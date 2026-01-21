@@ -345,13 +345,220 @@ def intent(
 @app.command()
 def connect(
     service: Annotated[str, typer.Argument(help="Service to connect (google, notion, etc.)")],
+    force: Annotated[
+        bool, typer.Option("--force", "-f", help="Force re-authentication")
+    ] = False,
 ):
     """Connect to an external service.
 
     Example:
         pai connect google
     """
-    console.print(f"[dim]Connector for '{service}' not yet implemented (Phase 3)[/dim]")
+    if service.lower() not in ("google", "gmail"):
+        console.print(f"[yellow]Connector for '{service}' not yet implemented[/yellow]")
+        console.print("[dim]Supported: google, gmail[/dim]")
+        return
+
+    async def _connect():
+        from pai.db import get_db
+        from pai.gmail import get_gmail_client
+
+        console.print(Panel.fit(
+            "[bold]Connecting to Google/Gmail[/bold]\n\n"
+            "This will open a browser window for OAuth authentication.\n"
+            "Make sure you have gmail_credentials.json in ~/.config/pai/",
+            title="Gmail OAuth",
+        ))
+
+        try:
+            client = get_gmail_client()
+            connector = await client.authenticate(force_refresh=force)
+
+            # Save connector to database
+            db = get_db()
+            await db.initialize()
+            await db.save_connector(connector)
+            await db.close()
+
+            console.print(f"\n[green]Connected to Gmail as:[/green] {connector.account_id}")
+
+            # Show labels
+            labels = await client.list_labels()
+            user_labels = [l for l in labels if l.get("type") != "system"]
+            if user_labels:
+                console.print(f"[dim]Found {len(user_labels)} user labels[/dim]")
+
+        except FileNotFoundError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            console.print("\n[yellow]To set up Gmail API:[/yellow]")
+            console.print("1. Go to https://console.cloud.google.com/apis/credentials")
+            console.print("2. Create OAuth 2.0 Client ID (Desktop app)")
+            console.print("3. Download JSON and save as ~/.config/pai/gmail_credentials.json")
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}")
+
+    run_async(_connect())
+
+
+# =============================================================================
+# Email commands (Phase 3)
+# =============================================================================
+
+
+@app.command()
+def emails(
+    query: Annotated[str, typer.Argument(help="Gmail search query")],
+    max_results: Annotated[
+        int, typer.Option("--max", "-m", help="Maximum results to show")
+    ] = 10,
+    show_body: Annotated[
+        bool, typer.Option("--body", "-b", help="Show email body")
+    ] = False,
+):
+    """Search emails with Gmail query syntax.
+
+    Example:
+        pai emails "from:client@example.com"
+        pai emails "has:attachment invoice" --max 5
+        pai emails "newer_than:7d subject:report"
+    """
+
+    async def _search():
+        from pai.gmail import get_gmail_client
+
+        client = get_gmail_client()
+
+        with console.status(f"[bold blue]Searching: {query}[/bold blue]"):
+            result = await client.search(query, max_results=max_results)
+
+        if not result.emails:
+            console.print("[dim]No emails found[/dim]")
+            return
+
+        console.print(f"\n[bold]Found {result.total_estimate} emails[/bold] (showing {len(result.emails)})\n")
+
+        for email in result.emails:
+            # Format date
+            date_str = email.date.strftime("%Y-%m-%d %H:%M") if email.date else "Unknown"
+
+            # Format from
+            from_str = email.from_.name or email.from_.email
+
+            # Labels
+            label_str = " ".join(f"[{l}]" for l in email.labels if not l.startswith("CATEGORY_"))
+
+            console.print(f"[cyan]{email.id[:12]}[/cyan] {date_str}")
+            console.print(f"  [bold]{email.subject or '(no subject)'}[/bold]")
+            console.print(f"  From: [green]{from_str}[/green] {label_str}")
+
+            if show_body:
+                body = email.body_text[:500] if email.body_text else email.snippet
+                console.print(f"  [dim]{body}[/dim]")
+
+            if email.attachments:
+                att_names = ", ".join(a.filename for a in email.attachments)
+                console.print(f"  [yellow]Attachments:[/yellow] {att_names}")
+
+            console.print()
+
+    run_async(_search())
+
+
+# =============================================================================
+# Entity commands (Phase 3)
+# =============================================================================
+
+
+@app.command("entities")
+def entities_cmd(
+    entity_type: Annotated[
+        Optional[str],
+        typer.Option("--type", "-t", help="Filter by type (client, person, project)"),
+    ] = None,
+    discover: Annotated[
+        bool, typer.Option("--discover", "-d", help="Discover entities from recent emails")
+    ] = False,
+    limit: Annotated[
+        int, typer.Option("--limit", "-l", help="Limit results")
+    ] = 20,
+):
+    """List and discover entities from your data.
+
+    Example:
+        pai entities                    # List all entities
+        pai entities --type client      # List only clients
+        pai entities --discover         # Discover from recent emails
+    """
+    from pai.models import EntityType
+
+    async def _entities():
+        from pai.db import get_db
+
+        db = get_db()
+        await db.initialize()
+
+        if discover:
+            # Discover entities from emails
+            from pai.gmail import EntityExtractor, get_gmail_client
+
+            console.print("[bold]Discovering entities from recent emails...[/bold]\n")
+
+            client = get_gmail_client()
+
+            with console.status("[bold blue]Fetching recent emails...[/bold blue]"):
+                result = await client.search("newer_than:30d", max_results=100)
+
+            console.print(f"[dim]Analyzed {len(result.emails)} emails[/dim]\n")
+
+            extractor = EntityExtractor()
+            existing = await db.list_entities()
+            new_entities = extractor.extract_from_emails(result.emails, existing)
+
+            if not new_entities:
+                console.print("[dim]No new entities discovered[/dim]")
+            else:
+                console.print(f"[green]Discovered {len(new_entities)} entities:[/green]\n")
+
+                for entity in new_entities[:limit]:
+                    console.print(f"  [{entity.type.value}] [bold]{entity.name}[/bold]")
+                    console.print(f"    Aliases: {', '.join(entity.aliases)}")
+                    console.print(f"    Emails: {entity.metadata.get('email_count', 0)}")
+                    console.print()
+
+                # Ask to save
+                if typer.confirm("Save these entities?"):
+                    for entity in new_entities:
+                        await db.save_entity(entity)
+                    console.print(f"[green]Saved {len(new_entities)} entities[/green]")
+        else:
+            # List existing entities
+            filter_type = EntityType(entity_type) if entity_type else None
+            entities = await db.list_entities(entity_type=filter_type)
+
+            if not entities:
+                console.print("[dim]No entities found. Use --discover to find entities from emails.[/dim]")
+                await db.close()
+                return
+
+            table = Table(title="Entities")
+            table.add_column("Type", style="cyan")
+            table.add_column("Name", style="bold")
+            table.add_column("Aliases")
+            table.add_column("Sources", style="dim")
+
+            for entity in entities[:limit]:
+                table.add_row(
+                    entity.type.value,
+                    entity.name,
+                    ", ".join(entity.aliases[:3]),
+                    str(len(entity.sources)),
+                )
+
+            console.print(table)
+
+        await db.close()
+
+    run_async(_entities())
 
 
 if __name__ == "__main__":
