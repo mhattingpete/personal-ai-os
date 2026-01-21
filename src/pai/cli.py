@@ -201,19 +201,140 @@ def list_automations(
 @app.command()
 def intent(
     text: Annotated[str, typer.Argument(help="Natural language intent to parse")],
+    plan: Annotated[
+        bool, typer.Option("--plan", "-p", help="Generate full automation spec")
+    ] = False,
+    save: Annotated[
+        bool, typer.Option("--save", "-s", help="Save the automation to database")
+    ] = False,
+    local: Annotated[
+        bool, typer.Option("--local", "-l", help="Use local LLM (llama.cpp)")
+    ] = False,
 ):
     """Parse a natural language intent into an automation spec.
 
     Example:
         pai intent "When a client emails me with an invoice, save it to their folder"
+        pai intent "Label emails from acme.com as Client" --plan
+        pai intent "Save PDF attachments to Dropbox" --local
     """
-    console.print(Panel.fit(
-        f"[bold]Input:[/bold] {text}",
-        title="Intent Parsing",
-    ))
+    from rich.syntax import Syntax
 
-    console.print("\n[dim]Intent engine not yet implemented (Phase 2)[/dim]")
-    console.print("[dim]This command will parse natural language and create automation specs[/dim]")
+    from pai.intent import IntentEngine
+    from pai.llm import get_provider
+
+    async def _intent():
+        console.print(Panel.fit(
+            f"[bold]Input:[/bold] {text}",
+            title="Intent Parsing",
+        ))
+
+        # Choose provider
+        provider = get_provider("local" if local else "claude")
+        if local:
+            console.print("[dim]Using local LLM (llama.cpp)[/dim]\n")
+
+        engine = IntentEngine(provider)
+
+        # Stage 1: Parse
+        with console.status("[bold blue]Parsing intent...[/bold blue]"):
+            result = await engine.parse(text)
+
+        intent_graph = result.intent
+
+        # Display parsed intent
+        console.print("\n[bold cyan]Parsed Intent[/bold cyan]")
+        console.print(f"  Type: [green]{intent_graph.type}[/green]")
+        console.print(f"  Confidence: [yellow]{intent_graph.confidence:.0%}[/yellow]")
+
+        if intent_graph.trigger:
+            console.print(f"  Trigger: [blue]{intent_graph.trigger.type}[/blue]")
+            if intent_graph.trigger.conditions:
+                for cond in intent_graph.trigger.conditions:
+                    console.print(f"    - {cond}")
+
+        if intent_graph.actions:
+            console.print("  Actions:")
+            for action in intent_graph.actions:
+                console.print(
+                    f"    - [magenta]{action.type}[/magenta] "
+                    f"(confidence: {action.confidence:.0%})"
+                )
+                if action.params:
+                    for k, v in action.params.items():
+                        console.print(f"      {k}: {v}")
+
+        # Display ambiguities
+        if intent_graph.ambiguities:
+            console.print("\n[bold yellow]Ambiguities Detected[/bold yellow]")
+            for amb in intent_graph.ambiguities:
+                console.print(f"  [yellow]?[/yellow] {amb.description}")
+                for q in amb.suggested_questions:
+                    console.print(f"    - {q}")
+
+        # Stage 2: Clarify (if needed)
+        if result.needs_clarification:
+            console.print("\n[dim]Run with --plan after clarifying ambiguities[/dim]")
+
+            # Generate clarification questions
+            with console.status("[bold blue]Generating questions...[/bold blue]"):
+                clarify_result = await engine.clarify(intent_graph)
+
+            if clarify_result.questions:
+                console.print("\n[bold cyan]Clarification Questions[/bold cyan]")
+                for i, q in enumerate(clarify_result.questions, 1):
+                    console.print(f"\n  {i}. {q.question}")
+                    if q.options:
+                        for opt in q.options:
+                            default = " [dim](default)[/dim]" if opt == q.default else ""
+                            console.print(f"     - {opt}{default}")
+            return
+
+        # Stage 3: Plan (if requested or ready)
+        if plan or result.ready_for_planning:
+            console.print("\n[bold cyan]Generating Automation Spec...[/bold cyan]")
+
+            with console.status("[bold blue]Planning automation...[/bold blue]"):
+                plan_result = await engine.plan(intent_graph)
+
+            automation = plan_result.automation
+
+            console.print(f"\n[bold green]Automation: {automation.name}[/bold green]")
+            console.print(f"  {plan_result.summary}")
+
+            # Show YAML-like representation
+            auto_dict = {
+                "name": automation.name,
+                "description": automation.description,
+                "trigger": {
+                    "type": automation.trigger.type,
+                },
+                "actions": [
+                    {"type": a.type} for a in automation.actions
+                ],
+            }
+
+            import yaml
+            yaml_str = yaml.dump(auto_dict, default_flow_style=False, sort_keys=False)
+            console.print("\n[bold]Automation Spec:[/bold]")
+            console.print(Syntax(yaml_str, "yaml", theme="monokai"))
+
+            # Show warnings
+            if plan_result.warnings:
+                console.print("\n[bold yellow]Warnings:[/bold yellow]")
+                for w in plan_result.warnings:
+                    console.print(f"  [yellow]![/yellow] {w}")
+
+            # Save if requested
+            if save:
+                from pai.db import get_db
+                db = get_db()
+                await db.initialize()
+                await db.save_automation(automation)
+                await db.close()
+                console.print(f"\n[green]Saved automation:[/green] {automation.id}")
+
+    run_async(_intent())
 
 
 # =============================================================================

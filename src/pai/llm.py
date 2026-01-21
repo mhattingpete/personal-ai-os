@@ -210,7 +210,12 @@ class LlamaCppProvider:
         max_tokens: int = 4096,
         temperature: float = 0.0,
     ) -> T:
-        """Generate a structured response matching the schema."""
+        """Generate a structured response matching the schema.
+
+        Uses two-call strategy for better reliability with local models:
+        1. First call: Generate content in natural language
+        2. Second call: Convert to JSON (if first call fails JSON parsing)
+        """
         # Build schema description
         schema_json = schema.model_json_schema()
         schema_str = json.dumps(schema_json, indent=2)
@@ -230,7 +235,7 @@ Respond ONLY with the JSON object, no markdown code blocks or explanations."""
         for m in messages:
             api_messages.append({"role": m.role, "content": m.content})
 
-        # Request with JSON mode if supported
+        # First attempt: Direct JSON generation
         response = await self.client.post(
             f"{self.url}/v1/chat/completions",
             json={
@@ -243,9 +248,65 @@ Respond ONLY with the JSON object, no markdown code blocks or explanations."""
         )
         response.raise_for_status()
         data = response.json()
-
         content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
+
+        # Try to parse JSON directly
+        try:
+            parsed = json.loads(content)
+            return schema.model_validate(parsed)
+        except (json.JSONDecodeError, Exception):
+            pass  # Fall through to two-call strategy
+
+        # Two-call strategy: Ask for natural language first, then convert
+        nl_system = system or "You are a helpful assistant."
+        nl_messages: list[dict[str, str]] = [
+            {"role": "system", "content": nl_system}
+        ]
+        for m in messages:
+            nl_messages.append({"role": m.role, "content": m.content})
+
+        # Call 1: Get natural language response
+        nl_response = await self.client.post(
+            f"{self.url}/v1/chat/completions",
+            json={
+                "model": self.model,
+                "messages": nl_messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+        )
+        nl_response.raise_for_status()
+        nl_data = nl_response.json()
+        nl_content = nl_data["choices"][0]["message"]["content"]
+
+        # Call 2: Convert to JSON
+        convert_messages: list[dict[str, str]] = [
+            {
+                "role": "system",
+                "content": f"""Convert the following text into valid JSON matching this schema:
+
+{schema_str}
+
+Output ONLY valid JSON, nothing else.""",
+            },
+            {"role": "user", "content": nl_content},
+        ]
+
+        convert_response = await self.client.post(
+            f"{self.url}/v1/chat/completions",
+            json={
+                "model": self.model,
+                "messages": convert_messages,
+                "max_tokens": max_tokens,
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"},
+            },
+        )
+        convert_response.raise_for_status()
+        convert_data = convert_response.json()
+        json_content = convert_data["choices"][0]["message"]["content"]
+
+        parsed = json.loads(json_content)
         return schema.model_validate(parsed)
 
     async def close(self) -> None:
