@@ -388,6 +388,34 @@ class GmailClient:
             for label in result.get("labels", [])
         ]
 
+    async def create_label(self, name: str) -> dict[str, str]:
+        """Create a new Gmail label.
+
+        Args:
+            name: Label name to create.
+
+        Returns:
+            Dict with id, name of created label.
+        """
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._create_label_sync, name
+        )
+
+    def _create_label_sync(self, name: str) -> dict[str, str]:
+        """Synchronous create label implementation."""
+        self._ensure_service()
+
+        label = self.service.users().labels().create(
+            userId="me",
+            body={
+                "name": name,
+                "labelListVisibility": "labelShow",
+                "messageListVisibility": "show",
+            },
+        ).execute()
+
+        return {"id": label["id"], "name": label["name"]}
+
     async def add_label(self, message_id: str, label_id: str) -> bool:
         """Add a label to a message.
 

@@ -40,6 +40,7 @@ class LocalLLMSettings(BaseSettings):
 
     url: str = "http://localhost:8080"
     model: str = "default"
+    timeout: float = 300.0  # 5 minutes - local models can be slow
 
     model_config = SettingsConfigDict(env_prefix="PAI_LOCAL_")
 

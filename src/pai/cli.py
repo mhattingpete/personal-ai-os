@@ -465,6 +465,252 @@ def emails(
 
 
 # =============================================================================
+# Execution commands (Phase 4)
+# =============================================================================
+
+
+@app.command("run")
+def run_automation_cmd(
+    automation_id: Annotated[str, typer.Argument(help="Automation ID to run")],
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", "-n", help="Simulate without executing")
+    ] = False,
+):
+    """Run an automation manually.
+
+    Example:
+        pai run abc123 --dry-run    # Preview what would happen
+        pai run abc123              # Actually run the automation
+    """
+    from rich.json import JSON
+
+    async def _run():
+        from pai.executor import run_automation
+
+        mode = "[yellow]DRY RUN[/yellow]" if dry_run else "[green]EXECUTING[/green]"
+        console.print(f"\n{mode} automation: [cyan]{automation_id}[/cyan]\n")
+
+        try:
+            execution = await run_automation(automation_id, dry_run=dry_run)
+
+            # Show results
+            status_style = {
+                "success": "[green]SUCCESS[/green]",
+                "failed": "[red]FAILED[/red]",
+                "partial": "[yellow]PARTIAL[/yellow]",
+                "running": "[blue]RUNNING[/blue]",
+            }.get(execution.status.value, str(execution.status))
+
+            console.print(f"Status: {status_style}")
+            console.print(f"Execution ID: [dim]{execution.id}[/dim]")
+
+            if execution.action_results:
+                console.print("\n[bold]Actions:[/bold]")
+                for result in execution.action_results:
+                    action_status = (
+                        "[green]✓[/green]" if result.status == "success"
+                        else "[red]✗[/red]" if result.status == "failed"
+                        else "[yellow]○[/yellow]"
+                    )
+                    console.print(f"  {action_status} {result.action_id}")
+
+                    if result.output:
+                        if dry_run and result.output.get("description"):
+                            console.print(f"      [dim]{result.output['description']}[/dim]")
+                        elif not dry_run:
+                            console.print(f"      [dim]{result.output}[/dim]")
+
+                    if result.error:
+                        console.print(f"      [red]Error: {result.error}[/red]")
+
+            if execution.error:
+                console.print(f"\n[red]Error:[/red] {execution.error.message}")
+
+        except ValueError as e:
+            console.print(f"[red]Error:[/red] {e}")
+
+    run_async(_run())
+
+
+@app.command("activate")
+def activate_automation_cmd(
+    automation_id: Annotated[str, typer.Argument(help="Automation ID to activate")],
+):
+    """Activate an automation (set status to active).
+
+    Example:
+        pai activate abc123
+    """
+
+    async def _activate():
+        from pai.executor import activate_automation
+
+        try:
+            automation = await activate_automation(automation_id)
+            console.print(f"[green]Activated:[/green] {automation.name}")
+            console.print(f"[dim]ID: {automation.id}[/dim]")
+        except ValueError as e:
+            console.print(f"[red]Error:[/red] {e}")
+
+    run_async(_activate())
+
+
+@app.command("pause")
+def pause_automation_cmd(
+    automation_id: Annotated[str, typer.Argument(help="Automation ID to pause")],
+):
+    """Pause an automation (set status to paused).
+
+    Example:
+        pai pause abc123
+    """
+
+    async def _pause():
+        from pai.executor import pause_automation
+
+        try:
+            automation = await pause_automation(automation_id)
+            console.print(f"[yellow]Paused:[/yellow] {automation.name}")
+            console.print(f"[dim]ID: {automation.id}[/dim]")
+        except ValueError as e:
+            console.print(f"[red]Error:[/red] {e}")
+
+    run_async(_pause())
+
+
+@app.command("delete")
+def delete_automation_cmd(
+    automation_id: Annotated[str, typer.Argument(help="Automation ID to delete")],
+    force: Annotated[
+        bool, typer.Option("--force", "-f", help="Skip confirmation")
+    ] = False,
+):
+    """Delete an automation.
+
+    Example:
+        pai delete abc123
+        pai delete abc123 --force
+    """
+
+    async def _delete():
+        from pai.db import get_db
+
+        db = get_db()
+        await db.initialize()
+
+        # Get automation first to show name
+        automation = await db.get_automation(automation_id)
+        if not automation:
+            console.print(f"[red]Error:[/red] Automation not found: {automation_id}")
+            await db.close()
+            return
+
+        # Confirm unless --force
+        if not force:
+            if not typer.confirm(f"Delete automation '{automation.name}'?"):
+                console.print("[dim]Cancelled[/dim]")
+                await db.close()
+                return
+
+        # Delete
+        deleted = await db.delete_automation(automation_id)
+        await db.close()
+
+        if deleted:
+            console.print(f"[green]Deleted:[/green] {automation.name}")
+        else:
+            console.print(f"[red]Error:[/red] Failed to delete")
+
+    run_async(_delete())
+
+
+@app.command("history")
+def history_cmd(
+    automation_id: Annotated[
+        Optional[str],
+        typer.Option("--automation", "-a", help="Filter by automation ID"),
+    ] = None,
+    status: Annotated[
+        Optional[str],
+        typer.Option("--status", "-s", help="Filter by status (success, failed, running)"),
+    ] = None,
+    limit: Annotated[
+        int, typer.Option("--limit", "-l", help="Maximum results")
+    ] = 20,
+):
+    """Show execution history.
+
+    Example:
+        pai history                       # Show recent executions
+        pai history --automation abc123   # Filter by automation
+        pai history --status failed       # Show only failures
+    """
+    from pai.models import ExecutionStatus
+
+    async def _history():
+        from pai.db import get_db
+
+        db = get_db()
+        await db.initialize()
+
+        try:
+            filter_status = ExecutionStatus(status) if status else None
+            executions = await db.list_executions(
+                automation_id=automation_id,
+                status=filter_status,
+                limit=limit,
+            )
+
+            if not executions:
+                console.print("[dim]No executions found[/dim]")
+                return
+
+            table = Table(title="Execution History")
+            table.add_column("ID", style="cyan", max_width=16)
+            table.add_column("Automation", max_width=12)
+            table.add_column("Status")
+            table.add_column("Triggered")
+            table.add_column("Duration")
+            table.add_column("Actions")
+
+            for exec in executions:
+                # Format status
+                status_style = {
+                    ExecutionStatus.SUCCESS: "[green]success[/green]",
+                    ExecutionStatus.FAILED: "[red]failed[/red]",
+                    ExecutionStatus.PARTIAL: "[yellow]partial[/yellow]",
+                    ExecutionStatus.RUNNING: "[blue]running[/blue]",
+                }.get(exec.status, str(exec.status))
+
+                # Calculate duration
+                if exec.completed_at:
+                    duration = exec.completed_at - exec.triggered_at
+                    duration_str = f"{duration.total_seconds():.1f}s"
+                else:
+                    duration_str = "..."
+
+                # Count action results
+                success = len([r for r in exec.action_results if r.status == "success"])
+                failed = len([r for r in exec.action_results if r.status == "failed"])
+                action_str = f"{success}✓ {failed}✗" if failed else f"{success}✓"
+
+                table.add_row(
+                    exec.id[:16],
+                    exec.automation_id[:12],
+                    status_style,
+                    exec.triggered_at.strftime("%Y-%m-%d %H:%M"),
+                    duration_str,
+                    action_str,
+                )
+
+            console.print(table)
+        finally:
+            await db.close()
+
+    run_async(_history())
+
+
+# =============================================================================
 # Entity commands (Phase 3)
 # =============================================================================
 

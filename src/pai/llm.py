@@ -158,11 +158,12 @@ Respond ONLY with the JSON object, no markdown code blocks or explanations."""
 class LlamaCppProvider:
     """Local llama.cpp server provider via OpenAI-compatible API."""
 
-    def __init__(self, url: str | None = None, model: str | None = None):
+    def __init__(self, url: str | None = None, model: str | None = None, timeout: float | None = None):
         settings = get_settings().llm.local
         self.url = (url or settings.url).rstrip("/")
         self.model = model or settings.model
-        self.client = httpx.AsyncClient(timeout=120.0)
+        self.timeout = timeout or settings.timeout
+        self.client = httpx.AsyncClient(timeout=self.timeout)
 
     async def complete(
         self,

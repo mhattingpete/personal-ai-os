@@ -322,6 +322,19 @@ class Database:
                 return None
             return self._row_to_automation(row)
 
+    async def delete_automation(self, automation_id: str) -> bool:
+        """Delete an automation by ID.
+
+        Returns:
+            True if deleted, False if not found.
+        """
+        async with self.connection() as conn:
+            cursor = await conn.execute(
+                "DELETE FROM automations WHERE id = ?", (automation_id,)
+            )
+            await conn.commit()
+            return cursor.rowcount > 0
+
     async def list_automations(
         self, status: AutomationStatus | None = None
     ) -> list[Automation]:

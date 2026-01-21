@@ -525,10 +525,17 @@ Output a JSON object with:
 - description: What this automation does
 - trigger_type: email, schedule, webhook, file_change, or manual
 - trigger_config: Configuration for the trigger
-- actions: List of actions with type, connector, and params
+- actions: List of actions, each with:
+  - type: The action type (e.g., "email.label", "file.move")
+  - connector: Which connector to use (e.g., "gmail")
+  - label: For email.label actions, the label name to apply
+  - message_id: For email actions, use "${{trigger.email.id}}" for dynamic reference
+  - Other params as needed (to, subject, body, path, etc.)
 - variables: Variables to extract and use
 - error_handling: How to handle errors
-- summary: Human-readable summary (2-3 sentences)"""
+- summary: Human-readable summary (2-3 sentences)
+
+IMPORTANT: Put action parameters at the top level of each action object, not nested under "params"."""
 
         messages = [Message(role="user", content="Generate automation spec")]
 
@@ -632,25 +639,28 @@ Output a JSON object with:
 
         for config in action_configs:
             action_type = config.get("type", "")
+            # LLM might nest params or put them at top level - check both
+            params = config.get("params", {})
 
             if action_type.startswith("file."):
                 actions.append(
                     FileAction(
                         type=action_type,  # type: ignore
-                        connector=config.get("connector", ""),
-                        path=config.get("path", ""),
-                        source=config.get("source"),
+                        connector=config.get("connector", params.get("connector", "")),
+                        path=config.get("path", params.get("path", "")),
+                        source=config.get("source", params.get("source")),
                     )
                 )
             elif action_type.startswith("email."):
                 actions.append(
                     EmailAction(
                         type=action_type,  # type: ignore
-                        connector=config.get("connector", ""),
-                        to=config.get("to"),
-                        subject=config.get("subject"),
-                        body=config.get("body"),
-                        label=config.get("label"),
+                        connector=config.get("connector", params.get("connector", "gmail")),
+                        to=config.get("to", params.get("to")),
+                        subject=config.get("subject", params.get("subject")),
+                        body=config.get("body", params.get("body")),
+                        label=config.get("label", params.get("label", params.get("label_name"))),
+                        message_id=config.get("message_id", params.get("message_id")),
                     )
                 )
             # Add more action types as needed
