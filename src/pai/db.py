@@ -27,12 +27,19 @@ from pai.models import (
 )
 
 # Schema version for migrations
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
+);
+
+-- Watcher state (for email polling)
+CREATE TABLE IF NOT EXISTS watcher_state (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Connectors (user's connected accounts)
@@ -497,6 +504,37 @@ class Database:
                 ambiguities=json.loads(row["ambiguities_json"]),
                 raw_input=row["raw_input"],
             )
+
+    # =========================================================================
+    # Watcher State
+    # =========================================================================
+
+    async def get_watcher_state(self) -> dict[str, Any] | None:
+        """Get the watcher state."""
+        async with self.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT value_json FROM watcher_state WHERE key = 'email_watcher'"
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            data = json.loads(row["value_json"])
+            # Parse datetime if present
+            if data.get("last_check"):
+                data["last_check"] = datetime.fromisoformat(data["last_check"])
+            return data
+
+    async def save_watcher_state(self, state: dict[str, Any]) -> None:
+        """Save the watcher state."""
+        async with self.connection() as conn:
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO watcher_state (key, value_json, updated_at)
+                VALUES ('email_watcher', ?, ?)
+                """,
+                (json.dumps(state), datetime.now().isoformat()),
+            )
+            await conn.commit()
 
 
 # Global database instance

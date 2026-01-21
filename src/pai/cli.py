@@ -711,6 +711,90 @@ def history_cmd(
 
 
 # =============================================================================
+# Watcher commands (Phase 5)
+# =============================================================================
+
+
+@app.command("watch")
+def watch_cmd(
+    interval: Annotated[
+        int, typer.Option("--interval", "-i", help="Seconds between polls")
+    ] = 60,
+    once: Annotated[
+        bool, typer.Option("--once", "-1", help="Run once and exit")
+    ] = False,
+):
+    """Watch for trigger events and run automations.
+
+    Polls Gmail for new emails matching active automation triggers.
+    Press Ctrl+C to stop.
+
+    Example:
+        pai watch                  # Poll every 60 seconds
+        pai watch --interval 30   # Poll every 30 seconds
+        pai watch --once          # Check once and exit
+    """
+
+    async def _watch():
+        from pai.watcher import EmailWatcher
+
+        console.print(Panel.fit(
+            f"[bold]Email Watcher[/bold]\n\n"
+            f"Polling interval: {interval}s\n"
+            f"Mode: {'single check' if once else 'continuous'}\n\n"
+            f"[dim]Watching for emails that match active automation triggers.[/dim]",
+            title="PAI Watcher",
+        ))
+
+        # Check for active automations
+        from pai.db import get_db
+        from pai.models import AutomationStatus
+
+        db = get_db()
+        await db.initialize()
+        automations = await db.list_automations(status=AutomationStatus.ACTIVE)
+        await db.close()
+
+        email_automations = [
+            a for a in automations
+            if (isinstance(a.trigger, dict) and a.trigger.get("type") == "email")
+            or (hasattr(a.trigger, "type") and a.trigger.type == "email")
+        ]
+
+        if not email_automations:
+            console.print("\n[yellow]Warning:[/yellow] No active automations with email triggers.")
+            console.print("[dim]Use 'pai list --status active' to see active automations.[/dim]")
+            console.print("[dim]Use 'pai activate <id>' to activate an automation.[/dim]\n")
+            if not once:
+                console.print("[dim]Watcher will start anyway and check periodically...[/dim]\n")
+        else:
+            console.print(f"\n[green]Found {len(email_automations)} active email automation(s)[/green]")
+            for auto in email_automations:
+                trigger = auto.trigger if isinstance(auto.trigger, dict) else auto.trigger.model_dump()
+                conditions = trigger.get("conditions", [])
+                cond_str = ", ".join(f"{c.get('field')}~{c.get('value')}" for c in conditions[:2])
+                console.print(f"  - [cyan]{auto.name}[/cyan] ({cond_str or 'all emails'})")
+            console.print()
+
+        watcher = EmailWatcher()
+
+        if once:
+            console.print("[dim]Running single check...[/dim]\n")
+            await watcher.start(interval=interval, max_iterations=1)
+            console.print("\n[green]Check complete.[/green]")
+        else:
+            console.print(f"[dim]Starting watcher (Ctrl+C to stop)...[/dim]\n")
+            try:
+                await watcher.start(interval=interval)
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Stopping watcher...[/yellow]")
+                watcher.stop()
+                console.print("[green]Watcher stopped.[/green]")
+
+    run_async(_watch())
+
+
+# =============================================================================
 # Entity commands (Phase 3)
 # =============================================================================
 
