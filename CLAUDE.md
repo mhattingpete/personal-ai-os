@@ -41,7 +41,7 @@
 ### MCP Servers (`pai_mcp/`)
 | Server | Purpose |
 |--------|---------|
-| `gmail/server.py` | Gmail MCP server: search, label, archive emails |
+| `gmail.py` | Gmail MCP server: search, label, archive emails |
 
 ### Commands
 ```bash
@@ -53,6 +53,6 @@ uv run pai intent "..."    # Parse natural language intent
 ### Don'ts
 - Don't create new files without asking
 - Don't add dependencies without asking
-- Don't nest folders deeper than `src/pai/` or `pai_mcp/<server>/`
+- Don't nest folders deeper than `src/pai/` or `pai_mcp/`
 - Don't write documentation files unless asked
 - Don't add legacy/fallback code paths - MCP-only for connectors
