@@ -23,6 +23,7 @@
 - **Database:** Use `db.py` wrapper, never raw SQL outside it
 - **Config:** Use Pydantic Settings, read from `~/.config/pai/`
 - **CLI:** Use Typer with Rich for output
+- **Connectors:** Use MCP servers in `pai_mcp/`, never direct API calls in executor
 
 ### File Responsibilities
 | File | Purpose |
@@ -31,9 +32,16 @@
 | `db.py` | SQLite wrapper, schema, migrations |
 | `llm.py` | LLM providers (Claude, llama.cpp) |
 | `intent.py` | Intent Engine: parse → clarify → plan |
+| `executor.py` | Execution Engine: run automations via MCP |
+| `mcp.py` | MCP client manager: connect to MCP servers, route actions |
 | `cli.py` | Typer commands |
 | `config.py` | Settings management |
-| `gmail.py` | Gmail connector (Phase 3) |
+| `gmail.py` | Gmail client (used by MCP server) |
+
+### MCP Servers (`pai_mcp/`)
+| Server | Purpose |
+|--------|---------|
+| `gmail/server.py` | Gmail MCP server: search, label, archive emails |
 
 ### Commands
 ```bash
@@ -45,5 +53,6 @@ uv run pai intent "..."    # Parse natural language intent
 ### Don'ts
 - Don't create new files without asking
 - Don't add dependencies without asking
-- Don't nest folders deeper than `src/pai/`
+- Don't nest folders deeper than `src/pai/` or `pai_mcp/<server>/`
 - Don't write documentation files unless asked
+- Don't add legacy/fallback code paths - MCP-only for connectors
