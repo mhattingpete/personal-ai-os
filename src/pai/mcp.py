@@ -281,7 +281,13 @@ ACTION_TO_MCP_TOOL: dict[str, tuple[str, str]] = {
     "email.label": ("gmail", "add_label"),
     "email.archive": ("gmail", "archive_email"),
     "email.send": ("gmail", "send_email"),
-    # Add more mappings as MCP servers are configured
+    # Outlook actions -> outlook MCP server
+    "outlook.list_emails": ("outlook", "list_emails"),
+    "outlook.reply": ("outlook", "reply_to_email"),
+    "outlook.get_email": ("outlook", "get_email_details"),
+    "outlook.mark_read": ("outlook", "mark_email_read"),
+    "outlook.list_events": ("outlook", "list_calendar_events"),
+    "outlook.get_event": ("outlook", "get_calendar_event_details"),
 }
 
 

@@ -245,7 +245,12 @@ Configure MCP servers that PAI connects to for external services:
   "servers": {
     "gmail": {
       "command": "uv",
-      "args": ["run", "pai-gmail-mcp"],
+      "args": ["run", "--directory", "/path/to/personal-ai-os", "pai-gmail-mcp"],
+      "env": {}
+    },
+    "outlook": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/outlook-mcp", "python", "mcp_server.py"],
       "env": {}
     }
   }

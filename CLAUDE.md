@@ -43,6 +43,11 @@
 |--------|---------|
 | `gmail.py` | Gmail MCP server: search, label, archive emails |
 
+### External MCP Servers (configured in `~/.config/pai/mcp.json`)
+| Server | Repo | Purpose |
+|--------|------|---------|
+| `outlook` | `outlook-mcp` | Outlook emails + calendar via Microsoft Graph |
+
 ### Commands
 ```bash
 uv run pai --help          # Run CLI
