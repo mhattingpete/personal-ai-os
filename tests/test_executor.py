@@ -1,10 +1,10 @@
 """Tests for the execution engine."""
 
 import pytest
-from datetime import datetime
+from unittest.mock import MagicMock, patch
 
 from pai.executor import (
-    EmailActionExecutor,
+    MCPActionExecutor,
     ExecutionEngine,
 )
 from pai.models import (
@@ -21,16 +21,24 @@ from pai.models import (
 )
 
 
-class TestEmailActionExecutor:
-    """Tests for email action executor."""
+class TestMCPActionExecutor:
+    """Tests for MCP action executor."""
 
     @pytest.fixture
-    def executor(self):
-        """Create an executor instance."""
-        return EmailActionExecutor()
+    def mock_mcp_manager(self):
+        """Create a mock MCP manager with gmail configured."""
+        manager = MagicMock()
+        manager.get_server_config.return_value = {"command": "uv", "args": ["run", "pai-gmail-mcp"]}
+        return manager
+
+    @pytest.fixture
+    def executor(self, mock_mcp_manager):
+        """Create an executor instance with mocked MCP manager."""
+        with patch("pai.executor.get_mcp_manager", return_value=mock_mcp_manager):
+            return MCPActionExecutor()
 
     def test_can_handle_email_action_dict(self, executor):
-        """Test that executor handles email action dicts."""
+        """Test that executor handles email action dicts when server configured."""
         action = {"type": "email.label", "label": "Test"}
         assert executor.can_handle(action) is True
 
@@ -43,9 +51,17 @@ class TestEmailActionExecutor:
         )
         assert executor.can_handle(action) is True
 
-    def test_cannot_handle_file_action(self, executor):
-        """Test that executor rejects non-email actions."""
-        action = {"type": "file.move", "path": "/tmp"}
+    def test_cannot_handle_unmapped_action(self, executor):
+        """Test that executor rejects actions without MCP mapping."""
+        action = {"type": "calendar.create", "title": "Meeting"}
+        assert executor.can_handle(action) is False
+
+    def test_cannot_handle_when_server_not_configured(self, mock_mcp_manager):
+        """Test that executor rejects when MCP server not configured."""
+        mock_mcp_manager.get_server_config.return_value = None
+        with patch("pai.executor.get_mcp_manager", return_value=mock_mcp_manager):
+            executor = MCPActionExecutor()
+        action = {"type": "email.label", "label": "Test"}
         assert executor.can_handle(action) is False
 
     @pytest.mark.asyncio
@@ -61,8 +77,9 @@ class TestEmailActionExecutor:
 
         assert result.status == "success"
         assert result.output["dry_run"] is True
-        assert result.output["would_execute"] == "email.label"
-        assert "Important" in result.output["description"]
+        assert "gmail.add_label" in result.output["would_execute"]
+        assert result.output["message_id"] == "msg_123"
+        assert result.output["label"] == "Important"
 
     @pytest.mark.asyncio
     async def test_dry_run_archive_action(self, executor):
@@ -76,7 +93,8 @@ class TestEmailActionExecutor:
 
         assert result.status == "success"
         assert result.output["dry_run"] is True
-        assert "archive" in result.output["description"].lower()
+        assert "gmail.archive_email" in result.output["would_execute"]
+        assert result.output["message_id"] == "msg_456"
 
     @pytest.mark.asyncio
     async def test_dry_run_with_variable_resolution(self, executor):
@@ -131,9 +149,17 @@ class TestExecutionEngine:
     """Tests for the execution engine."""
 
     @pytest.fixture
-    def engine(self):
-        """Create an engine instance."""
-        return ExecutionEngine()
+    def mock_mcp_manager(self):
+        """Create a mock MCP manager with gmail configured."""
+        manager = MagicMock()
+        manager.get_server_config.return_value = {"command": "uv", "args": ["run", "pai-gmail-mcp"]}
+        return manager
+
+    @pytest.fixture
+    def engine(self, mock_mcp_manager):
+        """Create an engine instance with mocked MCP manager."""
+        with patch("pai.executor.get_mcp_manager", return_value=mock_mcp_manager):
+            return ExecutionEngine()
 
     @pytest.fixture
     def sample_automation(self):
@@ -233,13 +259,27 @@ class TestExecutionEngine:
         assert execution.completed_at is not None
         assert execution.completed_at >= execution.triggered_at
 
+    @pytest.mark.asyncio
+    async def test_execution_fails_when_no_mcp_server(self, sample_automation):
+        """Test that execution fails when MCP server not configured."""
+        mock_manager = MagicMock()
+        mock_manager.get_server_config.return_value = None
+
+        with patch("pai.executor.get_mcp_manager", return_value=mock_manager):
+            engine = ExecutionEngine()
+            execution = await engine.run(sample_automation, dry_run=True)
+
+        assert execution.status == ExecutionStatus.FAILED
+        assert "No MCP server configured" in execution.action_results[0].error
+
 
 class TestVariableResolution:
     """Tests for variable resolution in execution context."""
 
     @pytest.fixture
     def engine(self):
-        return ExecutionEngine()
+        with patch("pai.executor.get_mcp_manager"):
+            return ExecutionEngine()
 
     def test_resolve_variables_from_trigger_event(self, engine):
         """Test that trigger event data is available as variables."""
