@@ -177,15 +177,41 @@ uv run pai config
 uv run pai config --show
 ```
 
+### `pai mcp`
+
+Manage MCP (Model Context Protocol) servers. PAI uses MCP to connect to external services like Gmail.
+
+```bash
+# List configured MCP servers
+uv run pai mcp list
+
+# List servers with their available tools
+uv run pai mcp list --tools
+
+# Show details for a specific server
+uv run pai mcp list --server gmail
+
+# Call an MCP tool directly
+uv run pai mcp call gmail search_emails --args '{"query": "is:unread", "max_results": 5}'
+```
+
+**Options for `mcp list`:**
+- `--tools, -t` - Show available tools for each server
+- `--server, -s` - Show details for a specific server
+
+**Options for `mcp call`:**
+- `--args, -a` - JSON arguments for the tool
+
 ## Configuration
 
 PAI stores configuration in `~/.config/pai/`:
 
 ```
 ~/.config/pai/
-├── config.yaml           # Settings (optional)
+├── config.yaml            # Settings (optional)
+├── mcp.json               # MCP server configuration
 ├── gmail_credentials.json # Gmail OAuth client (from Google)
-└── gmail_token.json      # Gmail OAuth token (auto-generated)
+└── gmail_token.json       # Gmail OAuth token (auto-generated)
 ```
 
 ### Environment Variables
@@ -209,6 +235,27 @@ llm:
 
 debug: false
 ```
+
+### mcp.json
+
+Configure MCP servers that PAI connects to for external services:
+
+```json
+{
+  "servers": {
+    "gmail": {
+      "command": "uv",
+      "args": ["run", "pai-gmail-mcp"],
+      "env": {}
+    }
+  }
+}
+```
+
+Each server needs:
+- `command` - The executable to run
+- `args` - Command line arguments
+- `env` - Environment variables (optional)
 
 ## Using Local LLM
 
