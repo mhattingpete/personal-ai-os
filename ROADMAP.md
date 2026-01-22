@@ -9,6 +9,7 @@ Personal AI OS - automate your digital life with natural language.
 - **Gmail Connector** - OAuth, search, labels, entity extraction
 - **Execution Engine** - Run automations, dry-run mode, history
 - **Trigger System** - Email watcher with condition matching
+- **MCP Architecture** - Model Context Protocol for all connectors (`pai_mcp/`)
 
 ## Short-Term
 
@@ -16,8 +17,8 @@ Priority: Enable the 3 MVP workflows from the spec.
 
 | Feature | Purpose |
 |---------|---------|
-| **Google Sheets Connector** | Log extracted data to spreadsheets |
-| **Google Drive Connector** | Save attachments to organized folders |
+| **Google Sheets MCP** | Log extracted data to spreadsheets (`pai_mcp/sheets.py`) |
+| **Google Drive MCP** | Save attachments to organized folders (`pai_mcp/drive.py`) |
 | **Attachment Executor** | Download and save email attachments |
 | **Schedule Triggers** | Run automations on cron schedules |
 | **Approval Gates** | Require confirmation for high-stakes actions |
@@ -30,7 +31,7 @@ Priority: Polish, learn, expand.
 |---------|---------|
 | **Learn Stage** | Capture corrections, auto-refine automations |
 | **Semantic Triggers** | LLM-powered condition matching ("invoice-related") |
-| **More Connectors** | Notion, Slack, Google Calendar |
+| **More MCP Servers** | Notion, Slack, Google Calendar |
 | **Cost Tracking** | Monitor API usage and LLM costs |
 | **Error Recovery** | Retry logic, partial rollback support |
 
@@ -61,4 +62,5 @@ These 3 workflows drive prioritization:
 - **CLI-first** - Core logic before UI
 - **Flat structure** - Easy to navigate and extend
 - **Async throughout** - Ready for I/O-heavy workloads
+- **MCP-based** - All connectors are MCP servers in `pai_mcp/`
 - **Pluggable** - Connectors and LLM providers are extensible
