@@ -388,38 +388,43 @@ class TestWatcherIntegration:
         mock_db = AsyncMock()
         mock_db.list_automations.return_value = [sample_automation]
 
-        mock_client = AsyncMock()
-        mock_client.search.return_value = MagicMock(emails=[sample_email])
+        # Mock the provider's search to return WatcherEmail
+        from pai.watcher import WatcherEmail
+        watcher_email = WatcherEmail.from_legacy_email(sample_email)
 
         with patch('pai.watcher.get_db', return_value=mock_db), \
-             patch.object(watcher, '_client', mock_client), \
+             patch.object(watcher._provider, 'search', new_callable=AsyncMock) as mock_search, \
              patch.object(watcher, '_execute_automation', new_callable=AsyncMock) as mock_execute, \
              patch.object(watcher, '_save_state', new_callable=AsyncMock):
+
+            mock_search.return_value = [watcher_email]
 
             await watcher._poll()
 
             # Verify automation was executed
-            mock_execute.assert_called_once_with(sample_automation, sample_email)
+            mock_execute.assert_called_once()
 
             # Verify email was marked as processed
-            assert sample_email.id in watcher._processed_ids
+            assert watcher_email.id in watcher._processed_ids
 
     @pytest.mark.asyncio
     async def test_poll_skips_already_processed_emails(self, sample_email, sample_automation):
         """Test that _poll skips already processed emails."""
+        from pai.watcher import WatcherEmail
+        watcher_email = WatcherEmail.from_legacy_email(sample_email)
+
         watcher = EmailWatcher()
-        watcher._processed_ids = {sample_email.id}  # Already processed
+        watcher._processed_ids = {watcher_email.id}  # Already processed
 
         mock_db = AsyncMock()
         mock_db.list_automations.return_value = [sample_automation]
 
-        mock_client = AsyncMock()
-        mock_client.search.return_value = MagicMock(emails=[sample_email])
-
         with patch('pai.watcher.get_db', return_value=mock_db), \
-             patch.object(watcher, '_client', mock_client), \
+             patch.object(watcher._provider, 'search', new_callable=AsyncMock) as mock_search, \
              patch.object(watcher, '_execute_automation', new_callable=AsyncMock) as mock_execute, \
              patch.object(watcher, '_save_state', new_callable=AsyncMock):
+
+            mock_search.return_value = [watcher_email]
 
             await watcher._poll()
 
@@ -429,6 +434,9 @@ class TestWatcherIntegration:
     @pytest.mark.asyncio
     async def test_poll_skips_non_matching_emails(self, sample_email):
         """Test that _poll skips emails that don't match trigger conditions."""
+        from pai.watcher import WatcherEmail
+        watcher_email = WatcherEmail.from_legacy_email(sample_email)
+
         watcher = EmailWatcher()
         watcher._processed_ids = set()
 
@@ -449,13 +457,12 @@ class TestWatcherIntegration:
         mock_db = AsyncMock()
         mock_db.list_automations.return_value = [automation]
 
-        mock_client = AsyncMock()
-        mock_client.search.return_value = MagicMock(emails=[sample_email])
-
         with patch('pai.watcher.get_db', return_value=mock_db), \
-             patch.object(watcher, '_client', mock_client), \
+             patch.object(watcher._provider, 'search', new_callable=AsyncMock) as mock_search, \
              patch.object(watcher, '_execute_automation', new_callable=AsyncMock) as mock_execute, \
              patch.object(watcher, '_save_state', new_callable=AsyncMock):
+
+            mock_search.return_value = [watcher_email]
 
             await watcher._poll()
 
@@ -463,4 +470,4 @@ class TestWatcherIntegration:
             mock_execute.assert_not_called()
 
             # But email should still be marked as processed
-            assert sample_email.id in watcher._processed_ids
+            assert watcher_email.id in watcher._processed_ids

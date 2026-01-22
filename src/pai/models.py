@@ -17,7 +17,14 @@ from pydantic import BaseModel, Field
 
 
 class ConnectorType(str, Enum):
-    """Supported connector types."""
+    """Supported connector types.
+
+    DEPRECATED: With MCP architecture, connectors are dynamically defined
+    in ~/.config/pai/mcp.json. This enum is kept for backward compatibility
+    with existing database records and will be removed in a future version.
+
+    New connectors should be added as MCP servers instead.
+    """
 
     GMAIL = "gmail"
     GOOGLE_SHEETS = "google_sheets"
@@ -27,6 +34,7 @@ class ConnectorType(str, Enum):
     DROPBOX = "dropbox"
     NOTION = "notion"
     SLACK = "slack"
+    # MCP-based connectors use string names directly, not this enum
 
 
 class ConnectorStatus(str, Enum):

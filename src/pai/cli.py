@@ -891,5 +891,193 @@ def entities_cmd(
     run_async(_entities())
 
 
+# =============================================================================
+# MCP commands (Phase 6 - MCP Architecture)
+# =============================================================================
+
+mcp_app = typer.Typer(help="Manage MCP (Model Context Protocol) servers")
+app.add_typer(mcp_app, name="mcp")
+
+
+@mcp_app.command("list")
+def mcp_list_cmd(
+    server: Annotated[
+        Optional[str],
+        typer.Option("--server", "-s", help="Show tools for specific server only"),
+    ] = None,
+    tools: Annotated[
+        bool, typer.Option("--tools", "-t", help="List tools for each server")
+    ] = False,
+):
+    """List configured MCP servers and their tools.
+
+    Example:
+        pai mcp list                  # List all servers
+        pai mcp list --tools          # List servers with their tools
+        pai mcp list --server gmail   # Show tools for gmail server
+    """
+    from pai.mcp import get_mcp_manager
+
+    async def _list():
+        manager = get_mcp_manager()
+        config = manager.load_config()
+
+        if not config.servers:
+            console.print("[dim]No MCP servers configured[/dim]")
+            console.print(f"[dim]Add servers to {manager._config_path}[/dim]")
+            return
+
+        if server:
+            # Show specific server details
+            server_config = manager.get_server_config(server)
+            if not server_config:
+                console.print(f"[red]Server not found:[/red] {server}")
+                return
+
+            console.print(f"\n[bold cyan]{server}[/bold cyan]")
+            console.print(f"  Command: [green]{server_config.command} {' '.join(server_config.args)}[/green]")
+            if server_config.env:
+                console.print("  Environment:")
+                for k, v in server_config.env.items():
+                    # Mask sensitive values
+                    display_v = "***" if "key" in k.lower() or "secret" in k.lower() else v
+                    console.print(f"    {k}: {display_v}")
+
+            # List tools
+            console.print("\n[bold]Tools:[/bold]")
+            try:
+                server_tools = await manager.list_tools(server)
+                if server_tools:
+                    for tool in server_tools:
+                        console.print(f"  [cyan]{tool.name}[/cyan]")
+                        if tool.description:
+                            console.print(f"    [dim]{tool.description[:100]}[/dim]")
+                else:
+                    console.print("  [dim]No tools available[/dim]")
+            except Exception as e:
+                console.print(f"  [red]Error connecting: {e}[/red]")
+        else:
+            # List all servers
+            table = Table(title="MCP Servers")
+            table.add_column("Server", style="cyan")
+            table.add_column("Command")
+            table.add_column("Status")
+
+            if tools:
+                table.add_column("Tools")
+
+            for name, srv_config in config.servers.items():
+                cmd_display = f"{srv_config.command} {srv_config.args[0] if srv_config.args else ''}"
+
+                if tools:
+                    try:
+                        server_tools = await manager.list_tools(name)
+                        status = "[green]connected[/green]"
+                        tool_count = f"{len(server_tools)} tools"
+                    except Exception:
+                        status = "[yellow]not running[/yellow]"
+                        tool_count = "-"
+                    table.add_row(name, cmd_display, status, tool_count)
+                else:
+                    table.add_row(name, cmd_display, "[dim]?[/dim]")
+
+            console.print(table)
+
+            if not tools:
+                console.print("\n[dim]Use --tools to check server status and list tools[/dim]")
+
+    run_async(_list())
+
+
+@mcp_app.command("auth")
+def mcp_auth_cmd(
+    server: Annotated[str, typer.Argument(help="Server name to authenticate")],
+):
+    """Trigger OAuth or authentication flow for an MCP server.
+
+    Example:
+        pai mcp auth gmail
+    """
+    from pai.mcp import get_mcp_manager
+
+    async def _auth():
+        manager = get_mcp_manager()
+        server_config = manager.get_server_config(server)
+
+        if not server_config:
+            console.print(f"[red]Server not found:[/red] {server}")
+            console.print(f"[dim]Configure in {manager._config_path}[/dim]")
+            return
+
+        console.print(f"[bold]Authenticating with {server}...[/bold]")
+
+        # Try to call an auth-related tool or connect to trigger OAuth
+        try:
+            async with manager.connect(server) as session:
+                # List tools to verify connection works
+                tools = await session.list_tools()
+                console.print(f"[green]Connected to {server}[/green]")
+                console.print(f"[dim]{len(tools.tools)} tools available[/dim]")
+
+                # Some MCP servers have an explicit auth tool
+                tool_names = [t.name for t in tools.tools]
+                if "authenticate" in tool_names:
+                    console.print("\n[bold]Running authentication...[/bold]")
+                    result = await session.call_tool("authenticate", {})
+                    console.print("[green]Authentication complete[/green]")
+                elif "auth" in tool_names:
+                    console.print("\n[bold]Running authentication...[/bold]")
+                    result = await session.call_tool("auth", {})
+                    console.print("[green]Authentication complete[/green]")
+                else:
+                    console.print("\n[yellow]Note:[/yellow] Server connected successfully.")
+                    console.print("[dim]This server may handle auth automatically or via environment variables.[/dim]")
+
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}")
+            console.print("\n[yellow]Troubleshooting:[/yellow]")
+            console.print("1. Check server command and args are correct")
+            console.print("2. Verify environment variables are set")
+            console.print("3. Try running the server command manually")
+
+    run_async(_auth())
+
+
+@mcp_app.command("add")
+def mcp_add_cmd(
+    name: Annotated[str, typer.Argument(help="Server name (e.g., 'gmail')")],
+    command: Annotated[str, typer.Argument(help="Command to run (e.g., 'uvx')")],
+    args: Annotated[
+        Optional[list[str]],
+        typer.Argument(help="Command arguments"),
+    ] = None,
+):
+    """Add a new MCP server configuration.
+
+    Example:
+        pai mcp add gmail uvx mcp-gmail
+        pai mcp add sheets npx -y @anthropic/mcp-google-sheets
+    """
+    from pai.mcp import MCPServerConfig, get_mcp_manager
+
+    manager = get_mcp_manager()
+    config = manager.load_config()
+
+    if name in config.servers:
+        if not typer.confirm(f"Server '{name}' already exists. Overwrite?"):
+            console.print("[dim]Cancelled[/dim]")
+            return
+
+    config.servers[name] = MCPServerConfig(
+        command=command,
+        args=args or [],
+        env={},
+    )
+
+    manager.save_config(config)
+    console.print(f"[green]Added MCP server:[/green] {name}")
+    console.print(f"[dim]Edit {manager._config_path} to add environment variables[/dim]")
+
+
 if __name__ == "__main__":
     app()
