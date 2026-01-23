@@ -10,6 +10,7 @@ Personal AI OS - automate your digital life with natural language.
 - **Execution Engine** - Run automations, dry-run mode, history
 - **Trigger System** - Email watcher with condition matching
 - **MCP Architecture** - Model Context Protocol for all connectors (`pai_mcp/`)
+- **Outlook Connector** - Email + calendar via Microsoft Graph (external MCP)
 
 ## Short-Term
 
