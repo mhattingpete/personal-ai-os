@@ -255,7 +255,29 @@ class ExtractAction(BaseModel):
     on_low_confidence: Literal["flag", "skip", "error"] = "flag"
 
 
-Action = FileAction | SpreadsheetAction | EmailAction | ExtractAction
+class EmailClassifyAction(BaseModel):
+    """Email classification action using LLM.
+
+    Classifies an email into one of the provided categories and applies
+    the corresponding label. Uses the configured LLM provider.
+    """
+
+    type: Literal["email.classify"] = "email.classify"
+    connector: str
+    message_id: str | None = None  # Email to classify (from trigger if None)
+    categories: list[str] = Field(
+        default_factory=lambda: ["requires_action", "no_action"]
+    )
+    category_labels: dict[str, str] = Field(
+        default_factory=lambda: {
+            "requires_action": "Requires Action",
+            "no_action": "No Action Required",
+        }
+    )
+    prompt: str | None = None  # Optional custom classification prompt
+
+
+Action = FileAction | SpreadsheetAction | EmailAction | ExtractAction | EmailClassifyAction
 
 
 # =============================================================================

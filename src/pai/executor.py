@@ -10,19 +10,65 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
+from pydantic import BaseModel, Field
+
 from pai.db import get_db
+from pai.llm import Message, get_provider
 from pai.mcp import get_mcp_manager, get_mcp_tool_for_action
 from pai.models import (
     Action,
     ActionResult,
     Automation,
     AutomationStatus,
+    EmailClassifyAction,
     Execution,
     ExecutionError,
     ExecutionStatus,
     ResolvedVariable,
     TriggerEvent,
 )
+
+
+# =============================================================================
+# Classification Models
+# =============================================================================
+
+
+class EmailClassification(BaseModel):
+    """LLM classification result for email."""
+
+    category: str  # One of the provided categories
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str  # Brief explanation for the classification
+
+
+def build_classification_prompt(
+    email: dict[str, Any],
+    categories: list[str],
+) -> str:
+    """Build the prompt for email classification.
+
+    Args:
+        email: Email data with 'from', 'subject', 'body' fields.
+        categories: List of category names to classify into.
+
+    Returns:
+        Prompt string for the LLM.
+    """
+    sender = email.get("from", "unknown")
+    subject = email.get("subject", "(no subject)")
+    body = email.get("body", "")[:1000]  # Truncate to avoid token limits
+
+    categories_str = ", ".join(categories)
+
+    return f"""Classify this email into exactly one category: {categories_str}
+
+From: {sender}
+Subject: {subject}
+Body:
+{body}
+
+Based on the content, determine if this email requires the recipient to take action (reply, complete a task, make a decision) or is purely informational."""
 
 
 # =============================================================================
@@ -33,8 +79,9 @@ from pai.models import (
 class MCPActionExecutor:
     """Executor that routes actions through MCP servers."""
 
-    def __init__(self):
+    def __init__(self, provider_name: str | None = None):
         self._manager = get_mcp_manager()
+        self._provider_name = provider_name
 
     def can_handle(self, action: Action) -> bool:
         """Check if this action can be handled via MCP."""
@@ -72,6 +119,11 @@ class MCPActionExecutor:
 
         # Resolve variables in action parameters
         action_data = self._resolve_templates(action_data, variables)
+
+        # Route email.classify to specialized handler
+        if action_type == "email.classify":
+            classify_action = EmailClassifyAction.model_validate(action_data)
+            return await self._execute_classify(classify_action, variables, dry_run)
 
         # Get MCP mapping
         mcp_mapping = get_mcp_tool_for_action(action_type)
@@ -192,6 +244,131 @@ class MCPActionExecutor:
                 return None
         return value
 
+    async def _execute_classify(
+        self,
+        action: EmailClassifyAction,
+        variables: dict[str, Any],
+        dry_run: bool = False,
+    ) -> ActionResult:
+        """Execute email classification action.
+
+        1. Fetch email content via MCP gmail.get_email
+        2. Build classification prompt
+        3. Call LLM with complete_structured() -> EmailClassification
+        4. Apply label via MCP gmail.add_label
+        5. Return result with classification details
+        """
+        start_time = time.time()
+        action_id = f"classify_{uuid4().hex[:8]}"
+
+        # Get message ID from action or trigger data
+        message_id = action.message_id
+        if not message_id:
+            message_id = self._get_nested_value(variables, "trigger.email.id")
+        if not message_id:
+            return ActionResult(
+                action_id=action_id,
+                status="failed",
+                error="No message_id provided and none found in trigger data",
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
+
+        # Step 1: Fetch email content via MCP
+        email_result = await self._manager.call_tool(
+            "gmail", "get_email", {"message_id": message_id}
+        )
+        if not email_result.success:
+            return ActionResult(
+                action_id=action_id,
+                status="failed",
+                error=f"Failed to fetch email: {email_result.error}",
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
+
+        # Parse email data from result
+        email_data = {}
+        for content in email_result.content:
+            if content.get("type") == "text":
+                import json
+                try:
+                    email_data = json.loads(content.get("text", "{}"))
+                except json.JSONDecodeError:
+                    email_data = {"body": content.get("text", "")}
+
+        # Step 2: Build classification prompt
+        prompt = build_classification_prompt(email_data, action.categories)
+        if prompt is None:
+            return ActionResult(
+                action_id=action_id,
+                status="failed",
+                error="build_classification_prompt() not implemented - this is your contribution point!",
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
+
+        if dry_run:
+            return ActionResult(
+                action_id=action_id,
+                status="success",
+                output={
+                    "dry_run": True,
+                    "would_classify": True,
+                    "message_id": message_id,
+                    "categories": action.categories,
+                    "email_subject": email_data.get("subject", ""),
+                    "prompt_preview": prompt[:200] + "..." if len(prompt) > 200 else prompt,
+                },
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
+
+        # Step 3: Call LLM for classification
+        llm = get_provider(self._provider_name)
+        classification = await llm.complete_structured(
+            messages=[Message(role="user", content=prompt)],
+            schema=EmailClassification,
+            system="You are an email classification assistant. Classify the email into exactly one of the provided categories.",
+            temperature=0.0,
+        )
+
+        # Validate category
+        if classification.category not in action.categories:
+            return ActionResult(
+                action_id=action_id,
+                status="failed",
+                error=f"LLM returned invalid category '{classification.category}'. Expected one of: {action.categories}",
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
+
+        # Step 4: Apply label via MCP
+        label = action.category_labels.get(classification.category)
+        if label:
+            label_result = await self._manager.call_tool(
+                "gmail", "add_label", {"message_id": message_id, "label": label}
+            )
+            if not label_result.success:
+                return ActionResult(
+                    action_id=action_id,
+                    status="failed",
+                    error=f"Failed to apply label: {label_result.error}",
+                    output={
+                        "classification": classification.model_dump(),
+                        "label_attempted": label,
+                    },
+                    duration_ms=int((time.time() - start_time) * 1000),
+                )
+
+        # Step 5: Return success with classification details
+        return ActionResult(
+            action_id=action_id,
+            status="success",
+            output={
+                "message_id": message_id,
+                "classification": classification.model_dump(),
+                "label_applied": label,
+                "email_subject": email_data.get("subject", ""),
+            },
+            duration_ms=int((time.time() - start_time) * 1000),
+        )
+
 
 # =============================================================================
 # Execution Engine
@@ -206,9 +383,13 @@ class ExecutionEngine:
         result = await engine.run(automation, trigger_event, dry_run=True)
     """
 
-    def __init__(self):
-        """Initialize execution engine."""
-        self._executor = MCPActionExecutor()
+    def __init__(self, provider_name: str | None = None):
+        """Initialize execution engine.
+
+        Args:
+            provider_name: LLM provider name ("claude" or "local"). Defaults to config.
+        """
+        self._executor = MCPActionExecutor(provider_name=provider_name)
 
     async def run(
         self,
@@ -318,6 +499,7 @@ async def run_automation(
     automation_id: str,
     trigger_event: TriggerEvent | None = None,
     dry_run: bool = False,
+    provider_name: str | None = None,
 ) -> Execution:
     """Run an automation by ID.
 
@@ -325,6 +507,7 @@ async def run_automation(
         automation_id: ID of the automation to run.
         trigger_event: Optional trigger event data.
         dry_run: If True, simulate but don't execute.
+        provider_name: LLM provider name ("claude" or "local"). Defaults to config.
 
     Returns:
         Execution record.
@@ -340,7 +523,7 @@ async def run_automation(
         if not automation:
             raise ValueError(f"Automation not found: {automation_id}")
 
-        engine = ExecutionEngine()
+        engine = ExecutionEngine(provider_name=provider_name)
         return await engine.run(automation, trigger_event, dry_run=dry_run)
     finally:
         await db.close()

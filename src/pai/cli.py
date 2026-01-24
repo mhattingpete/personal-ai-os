@@ -475,23 +475,50 @@ def run_automation_cmd(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", "-n", help="Simulate without executing")
     ] = False,
+    local: Annotated[
+        bool, typer.Option("--local", "-l", help="Use local LLM (llama.cpp)")
+    ] = False,
+    email_id: Annotated[
+        Optional[str], typer.Option("--email", "-e", help="Email message ID for trigger data")
+    ] = None,
 ):
     """Run an automation manually.
 
     Example:
-        pai run abc123 --dry-run    # Preview what would happen
-        pai run abc123              # Actually run the automation
+        pai run abc123 --dry-run           # Preview what would happen
+        pai run abc123                     # Actually run the automation
+        pai run abc123 --local             # Use local LLM for classification
+        pai run abc123 --email MSG_ID      # Run with specific email as trigger
     """
     from rich.json import JSON
+
+    from pai.models import TriggerEvent
 
     async def _run():
         from pai.executor import run_automation
 
         mode = "[yellow]DRY RUN[/yellow]" if dry_run else "[green]EXECUTING[/green]"
         console.print(f"\n{mode} automation: [cyan]{automation_id}[/cyan]\n")
+        if local:
+            console.print("[dim]Using local LLM (llama.cpp)[/dim]\n")
+
+        # Build trigger event if email_id provided
+        trigger_event = None
+        if email_id:
+            trigger_event = TriggerEvent(
+                type="email",
+                data={"email": {"id": email_id}},
+            )
+            console.print(f"[dim]Using email: {email_id}[/dim]\n")
 
         try:
-            execution = await run_automation(automation_id, dry_run=dry_run)
+            provider_name = "local" if local else None
+            execution = await run_automation(
+                automation_id,
+                trigger_event=trigger_event,
+                dry_run=dry_run,
+                provider_name=provider_name,
+            )
 
             # Show results
             status_style = {

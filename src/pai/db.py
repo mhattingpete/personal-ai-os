@@ -319,15 +319,29 @@ class Database:
             await conn.commit()
 
     async def get_automation(self, automation_id: str) -> Automation | None:
-        """Get an automation by ID."""
+        """Get an automation by ID.
+
+        Supports partial ID matching - if exact match fails, tries prefix match.
+        """
         async with self.connection() as conn:
+            # Try exact match first
             cursor = await conn.execute(
                 "SELECT * FROM automations WHERE id = ?", (automation_id,)
             )
             row = await cursor.fetchone()
-            if not row:
-                return None
-            return self._row_to_automation(row)
+            if row:
+                return self._row_to_automation(row)
+
+            # Try prefix match (for truncated IDs from display)
+            cursor = await conn.execute(
+                "SELECT * FROM automations WHERE id LIKE ?", (automation_id + "%",)
+            )
+            rows = await cursor.fetchall()
+            if len(rows) == 1:
+                return self._row_to_automation(rows[0])
+
+            # Multiple matches or none found
+            return None
 
     async def delete_automation(self, automation_id: str) -> bool:
         """Delete an automation by ID.

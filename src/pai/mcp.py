@@ -281,6 +281,7 @@ ACTION_TO_MCP_TOOL: dict[str, tuple[str, str]] = {
     "email.label": ("gmail", "add_label"),
     "email.archive": ("gmail", "archive_email"),
     "email.send": ("gmail", "send_email"),
+    "email.classify": ("gmail", "add_label"),  # Final action is labeling
     # Outlook actions -> outlook MCP server
     "outlook.list_emails": ("outlook", "list_emails"),
     "outlook.reply": ("outlook", "reply_to_email"),

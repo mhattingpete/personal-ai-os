@@ -20,6 +20,7 @@ from pai.models import (
     ClarificationState,
     Connector,
     EmailAction,
+    EmailClassifyAction,
     EmailCondition,
     EmailTrigger,
     Entity,
@@ -281,6 +282,7 @@ Trigger types:
 Action types:
 - "file.write", "file.read", "file.move": File operations
 - "email.send", "email.label", "email.archive": Email operations
+- "email.classify": Classify email using LLM and apply label (categories: requires_action, no_action)
 - "spreadsheet.append", "spreadsheet.read": Spreadsheet operations
 - "document.extract": Extract data from documents
 
@@ -526,16 +528,19 @@ Output a JSON object with:
 - trigger_type: email, schedule, webhook, file_change, or manual
 - trigger_config: Configuration for the trigger
 - actions: List of actions, each with:
-  - type: The action type (e.g., "email.label", "file.move")
+  - type: The action type (e.g., "email.label", "email.classify", "file.move")
   - connector: Which connector to use (e.g., "gmail")
-  - label: For email.label actions, the label name to apply
+  - For email.label: label (the label name)
+  - For email.classify: categories (list like ["requires_action", "no_action"]), category_labels (dict mapping category to Gmail label name)
   - message_id: For email actions, use "${{trigger.email.id}}" for dynamic reference
   - Other params as needed (to, subject, body, path, etc.)
 - variables: Variables to extract and use
 - error_handling: How to handle errors
 - summary: Human-readable summary (2-3 sentences)
 
-IMPORTANT: Put action parameters at the top level of each action object, not nested under "params"."""
+IMPORTANT:
+- Put action parameters at the top level of each action object, not nested under "params".
+- If the parsed actions include "email.classify", preserve that action type - do not convert to "email.label"."""
 
         messages = [Message(role="user", content="Generate automation spec")]
 
@@ -619,11 +624,27 @@ IMPORTANT: Put action parameters at the top level of each action object, not nes
         if trigger_type == "email":
             conditions = []
             for cond in config.get("conditions", []):
+                # LLM may use 'key' instead of 'field'
+                field = cond.get("field") or cond.get("key")
+                value = cond.get("value", "")
+
+                # Skip meta-conditions like {'key': 'incoming', 'value': True}
+                if field in ("incoming", "all", "any") or isinstance(value, bool):
+                    continue
+
+                # Ensure value is a string
+                value = str(value) if value else ""
+
+                # Validate field is a known email field
+                valid_fields = ("from", "to", "subject", "body", "attachments")
+                if field not in valid_fields:
+                    continue
+
                 conditions.append(
                     EmailCondition(
-                        field=cond.get("field", "from"),  # type: ignore
+                        field=field,  # type: ignore
                         operator=cond.get("operator", "contains"),  # type: ignore
-                        value=cond.get("value", ""),
+                        value=value,
                     )
                 )
             return EmailTrigger(
@@ -649,6 +670,22 @@ IMPORTANT: Put action parameters at the top level of each action object, not nes
                         connector=config.get("connector", params.get("connector", "")),
                         path=config.get("path", params.get("path", "")),
                         source=config.get("source", params.get("source")),
+                    )
+                )
+            elif action_type == "email.classify":
+                # Get categories from config or use defaults
+                categories = config.get("categories", params.get("categories", ["requires_action", "no_action"]))
+                category_labels = config.get("category_labels", params.get("category_labels", {
+                    "requires_action": "Requires Action",
+                    "no_action": "No Action Required",
+                }))
+                actions.append(
+                    EmailClassifyAction(
+                        connector=config.get("connector", params.get("connector", "gmail")),
+                        message_id=config.get("message_id", params.get("message_id")),
+                        categories=categories,
+                        category_labels=category_labels,
+                        prompt=config.get("prompt", params.get("prompt")),
                     )
                 )
             elif action_type.startswith("email."):
