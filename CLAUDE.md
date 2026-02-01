@@ -39,7 +39,7 @@ tests/            # pytest test suite
 ### File Responsibilities
 | File | Purpose |
 |------|---------|
-| `models.py` | Pydantic models: Automation, Entity, Execution, Trigger, Action, etc. |
+| `models.py` | Pydantic models: Automation, Entity, Execution, Triggers (Email, GitHub), Actions |
 | `db.py` | Async SQLite wrapper (aiosqlite), schema v2, migrations |
 | `llm.py` | LLM providers (Claude, llama.cpp) with routing and structured outputs |
 | `intent.py` | Intent Engine: parse → clarify → plan pipeline |
@@ -48,12 +48,13 @@ tests/            # pytest test suite
 | `cli.py` | Typer commands: init, config, status, list, intent, connect, emails, entities, mcp |
 | `config.py` | Pydantic Settings with YAML + env var support |
 | `gmail.py` | Gmail OAuth client: search, labels, entity extraction |
-| `watcher.py` | Email trigger watcher: polls for new emails, evaluates conditions |
+| `watcher.py` | Trigger watchers: EmailWatcher, GitHubPRWatcher - poll and evaluate conditions |
 
 ### MCP Servers (`pai_mcp/`)
 | Server | Purpose |
 |--------|---------|
 | `gmail.py` | Gmail MCP server (FastMCP): search, get, label, archive emails |
+| `github.py` | GitHub MCP server (FastMCP): list PRs, get reviews, format for Claude Code |
 
 ### External MCP Servers (configured in `~/.config/pai/mcp.json`)
 | Server | Repo | Purpose |
@@ -70,7 +71,13 @@ uv run pai connect google  # OAuth connect to Google
 uv run pai emails "query"  # Search emails
 uv run pai entities        # List discovered entities
 uv run pai mcp list        # List MCP servers
+uv run pai watch github    # Watch for PR reviews
 ```
+
+### Sandbox Exceptions
+Always use `dangerouslyDisableSandbox: true` for:
+- All `git` commands (commit, push, status, etc.)
+- `uv run` - Python package manager needs full filesystem access
 
 ### Architecture Flow
 ```
