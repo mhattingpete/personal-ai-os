@@ -18,6 +18,8 @@ from pai.models import (
     AutomationStatus,
     EmailCondition,
     EmailTrigger,
+    GitHubPRCondition,
+    GitHubPRTrigger,
     TriggerEvent,
 )
 
@@ -540,4 +542,319 @@ async def watch_emails(interval: int = 60) -> None:
         await watcher.start(interval=interval)
     except KeyboardInterrupt:
         print("\n[watcher] Stopping...")
+        watcher.stop()
+
+
+# =============================================================================
+# GitHub PR Watcher
+# =============================================================================
+
+
+class GitHubPRWatcher:
+    """Watches for new PR reviews and triggers automations.
+
+    Polls GitHub via MCP for PRs authored by the user that have new reviews.
+
+    Usage:
+        watcher = GitHubPRWatcher()
+        await watcher.start(interval=120)  # Poll every 2 minutes
+    """
+
+    def __init__(self):
+        self._mcp_manager = get_mcp_manager()
+        self._engine = ExecutionEngine()
+        self._running = False
+        self._last_check: datetime | None = None
+        self._processed_review_ids: set[str] = set()
+
+    async def start(
+        self,
+        interval: int = 120,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Start watching for new PR reviews.
+
+        Args:
+            interval: Seconds between polls.
+            max_iterations: Stop after N iterations (None = run forever).
+        """
+        self._running = True
+        await self._load_state()
+
+        iteration = 0
+        while self._running:
+            if max_iterations and iteration >= max_iterations:
+                break
+
+            try:
+                await self._poll()
+            except Exception as e:
+                print(f"[github-watcher] Error during poll: {e}")
+
+            iteration += 1
+            if self._running and (not max_iterations or iteration < max_iterations):
+                await asyncio.sleep(interval)
+
+    def stop(self) -> None:
+        """Stop the watcher."""
+        self._running = False
+
+    async def _poll(self) -> None:
+        """Poll for new PR reviews and check against triggers."""
+        db = get_db()
+        await db.initialize()
+
+        try:
+            # Get active automations with GitHub PR triggers
+            automations = await db.list_automations(status=AutomationStatus.ACTIVE)
+            github_automations = [
+                a for a in automations
+                if self._is_github_pr_trigger(a)
+            ]
+
+            if not github_automations:
+                return
+
+            # Get PRs with reviews via MCP
+            prs_with_reviews = await self._fetch_prs_with_reviews()
+
+            for pr_data in prs_with_reviews:
+                # Check each review on this PR
+                reviews = pr_data.get("reviews", [])
+                for review in reviews:
+                    review_id = f"{pr_data['repo']}#{pr_data['number']}:{review.get('id', '')}"
+
+                    # Skip if already processed
+                    if review_id in self._processed_review_ids:
+                        continue
+
+                    # Check against each automation
+                    for automation in github_automations:
+                        trigger = self._get_github_pr_trigger(automation)
+                        if trigger and self._matches_pr_review(pr_data, review, trigger):
+                            await self._execute_automation(automation, pr_data, review)
+
+                    self._processed_review_ids.add(review_id)
+
+            # Update state
+            self._last_check = datetime.now()
+            await self._save_state()
+
+            # Keep processed IDs bounded
+            if len(self._processed_review_ids) > 1000:
+                ids_list = list(self._processed_review_ids)
+                self._processed_review_ids = set(ids_list[-500:])
+
+        finally:
+            await db.close()
+
+    async def _fetch_prs_with_reviews(self) -> list[dict]:
+        """Fetch PRs authored by user that have reviews."""
+        result = await self._mcp_manager.call_tool(
+            "github",
+            "list_prs_with_reviews",
+            {"since_hours": 24},
+        )
+
+        if not result.success:
+            print(f"[github-watcher] Failed to fetch PRs: {result.error}")
+            return []
+
+        prs = []
+        if result.structured and isinstance(result.structured, dict):
+            prs_data = result.structured.get("prs_with_reviews", [])
+            # Fetch detailed reviews for each PR
+            for pr in prs_data:
+                detailed = await self._fetch_pr_reviews(pr["repo"], pr["number"])
+                if detailed:
+                    prs.append(detailed)
+        return prs
+
+    async def _fetch_pr_reviews(self, repo: str, pr_number: int) -> dict | None:
+        """Fetch detailed review data for a PR."""
+        result = await self._mcp_manager.call_tool(
+            "github",
+            "get_pr_reviews",
+            {"repo": repo, "pr_number": pr_number},
+        )
+
+        if not result.success:
+            return None
+
+        if result.structured and isinstance(result.structured, dict):
+            return result.structured
+        return None
+
+    def _is_github_pr_trigger(self, automation: Automation) -> bool:
+        """Check if automation has a GitHub PR trigger."""
+        trigger = automation.trigger
+        if isinstance(trigger, GitHubPRTrigger):
+            return True
+        if isinstance(trigger, dict):
+            return trigger.get("type") == "github_pr"
+        return False
+
+    def _get_github_pr_trigger(self, automation: Automation) -> GitHubPRTrigger | None:
+        """Get the GitHub PR trigger from an automation."""
+        trigger = automation.trigger
+        if isinstance(trigger, GitHubPRTrigger):
+            return trigger
+        if isinstance(trigger, dict) and trigger.get("type") == "github_pr":
+            conditions = []
+            for cond in trigger.get("conditions", []):
+                conditions.append(GitHubPRCondition(
+                    field=cond.get("field", "repo"),
+                    operator=cond.get("operator", "contains"),
+                    value=cond.get("value", ""),
+                ))
+            return GitHubPRTrigger(
+                account=trigger.get("account", ""),
+                conditions=conditions,
+                review_states=trigger.get("review_states", ["approved", "changes_requested", "commented"]),
+            )
+        return None
+
+    def _matches_pr_review(
+        self, pr_data: dict, review: dict, trigger: GitHubPRTrigger
+    ) -> bool:
+        """Check if a PR review matches the trigger conditions."""
+        # Check review state
+        review_state = review.get("state", "").lower()
+        if review_state not in [s.lower() for s in trigger.review_states]:
+            return False
+
+        # Check conditions
+        for condition in trigger.conditions:
+            if not self._check_pr_condition(pr_data, review, condition):
+                return False
+
+        return True
+
+    def _check_pr_condition(
+        self, pr_data: dict, review: dict, condition: GitHubPRCondition
+    ) -> bool:
+        """Check a single condition against PR/review data."""
+        # Get field value
+        if condition.field == "repo":
+            value = pr_data.get("repo", "")
+        elif condition.field == "author":
+            value = pr_data.get("pr", {}).get("author", {}).get("login", "")
+        elif condition.field == "reviewer":
+            value = review.get("author", "")
+        elif condition.field == "state":
+            value = review.get("state", "")
+        elif condition.field == "title":
+            value = pr_data.get("pr", {}).get("title", "")
+        else:
+            return False
+
+        # Apply operator
+        value_lower = value.lower()
+        pattern_lower = condition.value.lower()
+
+        if condition.operator == "equals":
+            return value_lower == pattern_lower
+        elif condition.operator == "contains":
+            return pattern_lower in value_lower
+        elif condition.operator == "matches":
+            try:
+                return bool(re.search(condition.value, value, re.IGNORECASE))
+            except re.error:
+                return False
+        return False
+
+    async def _execute_automation(
+        self, automation: Automation, pr_data: dict, review: dict
+    ) -> None:
+        """Execute an automation triggered by a PR review."""
+        pr = pr_data.get("pr", {})
+        repo = pr_data.get("repo", "")
+        pr_number = pr.get("number", 0)
+
+        print(f"[github-watcher] Triggering '{automation.name}' for PR #{pr_number} review by @{review.get('author')}")
+
+        # Format the review for Claude Code
+        formatted = await self._format_for_claude(repo, pr_number)
+
+        # Build trigger event
+        trigger_event = TriggerEvent(
+            type="github_pr",
+            data={
+                "repo": repo,
+                "pr_number": pr_number,
+                "branch": pr.get("headRefName", ""),
+                "title": pr.get("title", ""),
+                "review": {
+                    "author": review.get("author"),
+                    "state": review.get("state"),
+                    "body": review.get("body"),
+                },
+                "reviews": pr_data.get("reviews", []),
+                "comments": pr_data.get("comments", []),
+                "prompt": formatted.get("prompt", ""),
+                "files_changed": formatted.get("files_changed", []),
+            },
+        )
+
+        # Execute the automation
+        execution = await self._engine.run(automation, trigger_event, dry_run=False)
+
+        if execution.status.value == "success":
+            print(f"[github-watcher] Automation '{automation.name}' completed")
+        else:
+            print(f"[github-watcher] Automation '{automation.name}' failed: {execution.error}")
+
+    async def _format_for_claude(self, repo: str, pr_number: int) -> dict:
+        """Get formatted PR data for Claude Code."""
+        result = await self._mcp_manager.call_tool(
+            "github",
+            "format_review_for_claude",
+            {"repo": repo, "pr_number": pr_number},
+        )
+
+        if result.success and result.structured:
+            return result.structured
+        return {"prompt": "", "files_changed": []}
+
+    async def _load_state(self) -> None:
+        """Load watcher state from database."""
+        db = get_db()
+        await db.initialize()
+
+        try:
+            state = await db.get_watcher_state("github")
+            if state:
+                self._last_check = state.get("last_check")
+                self._processed_review_ids = set(state.get("processed_review_ids", []))
+        finally:
+            await db.close()
+
+    async def _save_state(self) -> None:
+        """Save watcher state to database."""
+        db = get_db()
+        await db.initialize()
+
+        try:
+            await db.save_watcher_state({
+                "last_check": self._last_check.isoformat() if self._last_check else None,
+                "processed_review_ids": list(self._processed_review_ids)[-500:],
+            }, "github")
+        finally:
+            await db.close()
+
+
+async def watch_github_prs(interval: int = 120) -> None:
+    """Start watching for GitHub PR reviews that trigger automations.
+
+    Args:
+        interval: Seconds between polls (default 2 minutes).
+    """
+    watcher = GitHubPRWatcher()
+    print(f"[github-watcher] Starting PR review watcher (polling every {interval}s)")
+    print("[github-watcher] Press Ctrl+C to stop")
+
+    try:
+        await watcher.start(interval=interval)
+    except KeyboardInterrupt:
+        print("\n[github-watcher] Stopping...")
         watcher.stop()

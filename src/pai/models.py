@@ -190,7 +190,36 @@ class ManualTrigger(BaseModel):
     type: Literal["manual"] = "manual"
 
 
-Trigger = EmailTrigger | ScheduleTrigger | WebhookTrigger | FileChangeTrigger | ManualTrigger
+class GitHubPRCondition(BaseModel):
+    """Condition for GitHub PR review trigger."""
+
+    field: Literal["repo", "author", "reviewer", "state", "title"]
+    operator: Literal["equals", "contains", "matches"]
+    value: str
+
+
+class GitHubPRTrigger(BaseModel):
+    """Trigger on GitHub PR review.
+
+    Watches for new reviews on PRs authored by the user.
+    """
+
+    type: Literal["github_pr"] = "github_pr"
+    account: str  # GitHub username
+    conditions: list[GitHubPRCondition] = Field(default_factory=list)
+    review_states: list[Literal["approved", "changes_requested", "commented"]] = Field(
+        default_factory=lambda: ["approved", "changes_requested", "commented"]
+    )
+
+
+Trigger = (
+    EmailTrigger
+    | ScheduleTrigger
+    | WebhookTrigger
+    | FileChangeTrigger
+    | ManualTrigger
+    | GitHubPRTrigger
+)
 
 
 # =============================================================================
@@ -277,7 +306,42 @@ class EmailClassifyAction(BaseModel):
     prompt: str | None = None  # Optional custom classification prompt
 
 
-Action = FileAction | SpreadsheetAction | EmailAction | ExtractAction | EmailClassifyAction
+class GitHubReviewAction(BaseModel):
+    """Launch Claude Code to implement PR review feedback.
+
+    Formats the PR review context and opens a new terminal with Claude Code
+    pre-loaded with a prompt to implement the reviewer's suggestions.
+
+    This action integrates with the bash automation feature (once implemented)
+    to run a script that:
+    1. Navigates to the repo directory
+    2. Checks out the PR branch
+    3. Launches Claude Code with the formatted prompt
+
+    Until bash automation is ready, this action writes the prompt to a file
+    and notifies the user to run Claude Code manually.
+    """
+
+    type: Literal["github.implement_review"] = "github.implement_review"
+    # PR context (resolved from trigger)
+    repo: str | None = None  # owner/repo format, e.g. "owner/repo"
+    pr_number: int | None = None
+    # Local repo path (will search common locations if not set)
+    local_repo_path: str | None = None
+    # Custom instructions to include in Claude Code prompt
+    additional_instructions: str | None = None
+    # Bash script ID (for bash automation integration)
+    script_id: str | None = None
+
+
+Action = (
+    FileAction
+    | SpreadsheetAction
+    | EmailAction
+    | ExtractAction
+    | EmailClassifyAction
+    | GitHubReviewAction
+)
 
 
 # =============================================================================

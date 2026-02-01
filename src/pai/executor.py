@@ -125,6 +125,10 @@ class MCPActionExecutor:
             classify_action = EmailClassifyAction.model_validate(action_data)
             return await self._execute_classify(classify_action, variables, dry_run)
 
+        # Route github.implement_review to specialized handler
+        if action_type == "github.implement_review":
+            return await self._execute_github_review(action_data, variables, dry_run)
+
         # Get MCP mapping
         mcp_mapping = get_mcp_tool_for_action(action_type)
         if not mcp_mapping:
@@ -365,6 +369,144 @@ class MCPActionExecutor:
                 "classification": classification.model_dump(),
                 "label_applied": label,
                 "email_subject": email_data.get("subject", ""),
+            },
+            duration_ms=int((time.time() - start_time) * 1000),
+        )
+
+    async def _execute_github_review(
+        self,
+        action_data: dict[str, Any],
+        variables: dict[str, Any],
+        dry_run: bool = False,
+    ) -> ActionResult:
+        """Execute GitHub review implementation action.
+
+        This action prepares context for Claude Code to implement PR review feedback.
+        It uses the bash automation feature (when available) to launch Claude Code
+        with the formatted prompt.
+
+        Until bash automation is implemented, this:
+        1. Fetches PR review context via MCP
+        2. Writes prompt to a file
+        3. Returns instructions for the user to run Claude Code manually
+
+        Once bash automation is available, it will:
+        1. Fetch PR review context via MCP
+        2. Execute a bash script that launches Claude Code with the prompt
+        """
+        from pathlib import Path
+
+        start_time = time.time()
+        action_id = f"github_review_{uuid4().hex[:8]}"
+
+        # Get repo and PR number from action or trigger data
+        repo = action_data.get("repo")
+        pr_number = action_data.get("pr_number")
+
+        if not repo:
+            repo = self._get_nested_value(variables, "trigger.repo")
+        if not pr_number:
+            pr_number = self._get_nested_value(variables, "trigger.pr_number")
+
+        if not repo or not pr_number:
+            return ActionResult(
+                action_id=action_id,
+                status="failed",
+                error="Missing repo or pr_number - provide in action or trigger data",
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
+
+        # Get formatted prompt from trigger data (already set by watcher)
+        prompt = self._get_nested_value(variables, "trigger.prompt")
+        branch = self._get_nested_value(variables, "trigger.branch")
+
+        # If no prompt in trigger, fetch it via MCP
+        if not prompt:
+            format_result = await self._manager.call_tool(
+                "github", "format_review_for_claude",
+                {"repo": repo, "pr_number": pr_number},
+            )
+            if format_result.success and format_result.structured:
+                prompt = format_result.structured.get("prompt", "")
+                branch = format_result.structured.get("branch", "")
+
+        if not prompt:
+            return ActionResult(
+                action_id=action_id,
+                status="failed",
+                error="Failed to get PR review context",
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
+
+        # Add any custom instructions
+        additional = action_data.get("additional_instructions")
+        if additional:
+            prompt += f"\n\n## Additional Instructions\n{additional}"
+
+        # Write prompt to a task file
+        config_dir = Path.home() / ".config" / "pai" / "pr-tasks"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        task_file = config_dir / f"{repo.replace('/', '_')}_{pr_number}.md"
+
+        if dry_run:
+            return ActionResult(
+                action_id=action_id,
+                status="success",
+                output={
+                    "dry_run": True,
+                    "repo": repo,
+                    "pr_number": pr_number,
+                    "branch": branch,
+                    "would_write_to": str(task_file),
+                    "prompt_preview": prompt[:500] + "..." if len(prompt) > 500 else prompt,
+                },
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
+
+        # Write the task file
+        task_file.write_text(prompt)
+
+        # Try to find the local repo path
+        local_repo = action_data.get("local_repo_path")
+        if not local_repo:
+            # Try common locations
+            repo_name = repo.split("/")[-1]
+            search_paths = [
+                Path.home() / "Documents" / "Repos" / repo_name,
+                Path.home() / "repos" / repo_name,
+                Path.home() / "code" / repo_name,
+                Path.home() / repo_name,
+                Path.cwd() / repo_name,
+            ]
+            for p in search_paths:
+                if p.exists() and (p / ".git").exists():
+                    local_repo = str(p)
+                    break
+
+        # Build the Claude Code command
+        # TODO: Once bash automation is implemented, this will use BashAction
+        # to run a sandboxed script that:
+        # 1. cd to local_repo
+        # 2. git checkout branch
+        # 3. claude --print "$(cat task_file)"
+        claude_cmd = f"cd {local_repo} && git checkout {branch} && claude --print \"$(cat {task_file})\""
+
+        return ActionResult(
+            action_id=action_id,
+            status="success",
+            output={
+                "repo": repo,
+                "pr_number": pr_number,
+                "branch": branch,
+                "task_file": str(task_file),
+                "local_repo": local_repo,
+                "claude_command": claude_cmd,
+                "message": (
+                    f"PR review context saved to {task_file}.\n"
+                    f"To implement the changes, run:\n\n"
+                    f"  {claude_cmd}\n\n"
+                    "Or manually: cd to repo, checkout branch, then run claude with the task file."
+                ),
             },
             duration_ms=int((time.time() - start_time) * 1000),
         )

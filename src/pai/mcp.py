@@ -289,6 +289,12 @@ ACTION_TO_MCP_TOOL: dict[str, tuple[str, str]] = {
     "outlook.mark_read": ("outlook", "mark_email_read"),
     "outlook.list_events": ("outlook", "list_calendar_events"),
     "outlook.get_event": ("outlook", "get_calendar_event_details"),
+    # GitHub actions -> github MCP server
+    "github.list_prs": ("github", "list_my_prs"),
+    "github.get_reviews": ("github", "get_pr_reviews"),
+    "github.get_diff": ("github", "get_pr_diff"),
+    "github.format_review": ("github", "format_review_for_claude"),
+    "github.implement_review": ("github", "format_review_for_claude"),  # Gets context for bash
 }
 
 

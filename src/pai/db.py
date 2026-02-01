@@ -523,11 +523,16 @@ class Database:
     # Watcher State
     # =========================================================================
 
-    async def get_watcher_state(self) -> dict[str, Any] | None:
-        """Get the watcher state."""
+    async def get_watcher_state(self, watcher_type: str = "email") -> dict[str, Any] | None:
+        """Get the watcher state for a specific watcher type.
+
+        Args:
+            watcher_type: Type of watcher ("email", "github", etc.)
+        """
+        key = f"{watcher_type}_watcher"
         async with self.connection() as conn:
             cursor = await conn.execute(
-                "SELECT value_json FROM watcher_state WHERE key = 'email_watcher'"
+                "SELECT value_json FROM watcher_state WHERE key = ?", (key,)
             )
             row = await cursor.fetchone()
             if not row:
@@ -538,15 +543,23 @@ class Database:
                 data["last_check"] = datetime.fromisoformat(data["last_check"])
             return data
 
-    async def save_watcher_state(self, state: dict[str, Any]) -> None:
-        """Save the watcher state."""
+    async def save_watcher_state(
+        self, state: dict[str, Any], watcher_type: str = "email"
+    ) -> None:
+        """Save the watcher state for a specific watcher type.
+
+        Args:
+            state: State data to save.
+            watcher_type: Type of watcher ("email", "github", etc.)
+        """
+        key = f"{watcher_type}_watcher"
         async with self.connection() as conn:
             await conn.execute(
                 """
                 INSERT OR REPLACE INTO watcher_state (key, value_json, updated_at)
-                VALUES ('email_watcher', ?, ?)
+                VALUES (?, ?, ?)
                 """,
-                (json.dumps(state), datetime.now().isoformat()),
+                (key, json.dumps(state), datetime.now().isoformat()),
             )
             await conn.commit()
 

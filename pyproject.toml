@@ -27,6 +27,7 @@ dev = [
 [project.scripts]
 pai = "pai.cli:app"
 pai-gmail-mcp = "pai_mcp.gmail:main"
+pai-github-mcp = "pai_mcp.github:main"
 
 [build-system]
 requires = ["hatchling"]

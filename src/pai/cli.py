@@ -501,6 +501,9 @@ async def list_automations(
 @app.command("watch")
 @async_command
 async def watch_cmd(
+    source: Annotated[
+        str, typer.Argument(help="What to watch: 'email' or 'github'")
+    ] = "email",
     interval: Annotated[
         int, typer.Option("--interval", "-i", help="Seconds between polls")
     ] = 60,
@@ -510,14 +513,20 @@ async def watch_cmd(
 ):
     """Watch for trigger events and run automations.
 
-    Polls Gmail for new emails matching active automation triggers.
+    Polls email or GitHub for events matching active automation triggers.
     Press Ctrl+C to stop.
 
     Example:
-        pai watch                  # Poll every 60 seconds
-        pai watch --interval 30   # Poll every 30 seconds
-        pai watch --once          # Check once and exit
+        pai watch                     # Watch emails (default)
+        pai watch email               # Watch emails explicitly
+        pai watch github              # Watch GitHub PR reviews
+        pai watch github -i 120       # GitHub with 2min interval
+        pai watch --once              # Check once and exit
     """
+    if source == "github":
+        await _watch_github(interval, once)
+        return
+
     from pai.watcher import EmailWatcher
 
     console.print(Panel.fit(
@@ -556,6 +565,61 @@ async def watch_cmd(
         console.print()
 
     watcher = EmailWatcher()
+
+    if once:
+        console.print("[dim]Running single check...[/dim]\n")
+        await watcher.start(interval=interval, max_iterations=1)
+        console.print("\n[green]Check complete.[/green]")
+    else:
+        console.print(f"[dim]Starting watcher (Ctrl+C to stop)...[/dim]\n")
+        try:
+            await watcher.start(interval=interval)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Stopping watcher...[/yellow]")
+            watcher.stop()
+            console.print("[green]Watcher stopped.[/green]")
+
+
+async def _watch_github(interval: int, once: bool) -> None:
+    """Watch for GitHub PR reviews."""
+    from pai.watcher import GitHubPRWatcher
+
+    # Default to 2 minutes for GitHub to avoid rate limits
+    if interval == 60:
+        interval = 120
+
+    console.print(Panel.fit(
+        f"[bold]GitHub PR Review Watcher[/bold]\n\n"
+        f"Polling interval: {interval}s\n"
+        f"Mode: {'single check' if once else 'continuous'}\n\n"
+        f"[dim]Watching for PR reviews on your pull requests.[/dim]",
+        title="PAI GitHub Watcher",
+    ))
+
+    # Check for active automations
+    db = get_db()
+    await db.initialize()
+    automations = await db.list_automations(status=AutomationStatus.ACTIVE)
+    await db.close()
+
+    github_automations = [
+        a for a in automations
+        if (isinstance(a.trigger, dict) and a.trigger.get("type") == "github_pr")
+        or (hasattr(a.trigger, "type") and a.trigger.type == "github_pr")
+    ]
+
+    if not github_automations:
+        console.print("\n[yellow]Warning:[/yellow] No active automations with github_pr triggers.")
+        console.print("[dim]Use 'pai intent \"when someone reviews my PR...\" --plan --save'[/dim]")
+        if not once:
+            console.print("[dim]Watcher will start anyway and check periodically...[/dim]\n")
+    else:
+        console.print(f"\n[green]Found {len(github_automations)} active GitHub automation(s)[/green]")
+        for auto in github_automations:
+            console.print(f"  - [cyan]{auto.name}[/cyan]")
+        console.print()
+
+    watcher = GitHubPRWatcher()
 
     if once:
         console.print("[dim]Running single check...[/dim]\n")

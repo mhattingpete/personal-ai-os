@@ -12,8 +12,11 @@ from pai.models import (
     EmailAction,
     EmailCondition,
     EmailTrigger,
+    GitHubPRCondition,
+    GitHubPRTrigger,
+    GitHubReviewAction,
 )
-from pai.watcher import EmailWatcher, TriggerMatcher
+from pai.watcher import EmailWatcher, GitHubPRWatcher, TriggerMatcher
 
 
 # =============================================================================
@@ -471,3 +474,411 @@ class TestWatcherIntegration:
 
             # But email should still be marked as processed
             assert watcher_email.id in watcher._processed_ids
+
+
+# =============================================================================
+# GitHub PR Watcher Tests
+# =============================================================================
+
+
+@pytest.fixture
+def sample_github_automation():
+    """Create a sample automation with GitHub PR trigger."""
+    return Automation(
+        id="auto_gh_123",
+        name="Implement PR Reviews",
+        description="Implement PR review feedback with Claude Code",
+        status=AutomationStatus.ACTIVE,
+        trigger=GitHubPRTrigger(
+            account="testuser",
+            conditions=[
+                GitHubPRCondition(field="repo", operator="contains", value="my-project"),
+            ],
+            review_states=["changes_requested", "commented"],
+        ),
+        actions=[
+            GitHubReviewAction(
+                additional_instructions="Run tests after changes",
+            )
+        ],
+    )
+
+
+@pytest.fixture
+def sample_pr_data():
+    """Create sample PR data as returned by MCP.
+
+    Note: The watcher expects 'number' and 'repo' at the top level,
+    with 'pr' containing detailed PR info from get_pr_reviews.
+    """
+    return {
+        "repo": "testuser/my-project",
+        "number": 42,  # PR number at top level for review ID tracking
+        "pr": {
+            "number": 42,
+            "title": "Add new feature",
+            "author": {"login": "testuser"},
+            "headRefName": "feature-branch",
+            "baseRefName": "main",
+            "additions": 100,
+            "deletions": 20,
+            "changedFiles": 5,
+        },
+        "reviews": [
+            {
+                "id": 12345,
+                "author": "reviewer1",
+                "state": "CHANGES_REQUESTED",
+                "body": "Please fix the typo on line 42",
+            }
+        ],
+        "comments": [
+            {
+                "id": 67890,
+                "author": "reviewer1",
+                "path": "src/main.py",
+                "line": 42,
+                "body": "Typo here: 'teh' should be 'the'",
+            }
+        ],
+    }
+
+
+class TestGitHubPRWatcher:
+    """Tests for GitHubPRWatcher."""
+
+    def test_is_github_pr_trigger_with_trigger_object(self, sample_github_automation):
+        """Test _is_github_pr_trigger with GitHubPRTrigger object."""
+        watcher = GitHubPRWatcher()
+        assert watcher._is_github_pr_trigger(sample_github_automation) is True
+
+    def test_is_github_pr_trigger_with_dict_trigger(self):
+        """Test _is_github_pr_trigger with dict trigger."""
+        watcher = GitHubPRWatcher()
+        automation = Automation(
+            id="auto_1",
+            name="Test",
+            trigger={"type": "github_pr", "account": "test", "conditions": []},
+            actions=[],
+        )
+        assert watcher._is_github_pr_trigger(automation) is True
+
+    def test_is_github_pr_trigger_with_non_github_trigger(self):
+        """Test _is_github_pr_trigger with non-GitHub trigger."""
+        watcher = GitHubPRWatcher()
+        automation = Automation(
+            id="auto_1",
+            name="Test",
+            trigger={"type": "email", "account": "test@example.com", "conditions": []},
+            actions=[],
+        )
+        assert watcher._is_github_pr_trigger(automation) is False
+
+    def test_get_github_pr_trigger_from_object(self, sample_github_automation):
+        """Test _get_github_pr_trigger with GitHubPRTrigger object."""
+        watcher = GitHubPRWatcher()
+        trigger = watcher._get_github_pr_trigger(sample_github_automation)
+
+        assert trigger is not None
+        assert isinstance(trigger, GitHubPRTrigger)
+        assert len(trigger.conditions) == 1
+        assert trigger.conditions[0].value == "my-project"
+        assert "changes_requested" in trigger.review_states
+
+    def test_get_github_pr_trigger_from_dict(self):
+        """Test _get_github_pr_trigger with dict trigger."""
+        watcher = GitHubPRWatcher()
+        automation = Automation(
+            id="auto_1",
+            name="Test",
+            trigger={
+                "type": "github_pr",
+                "account": "testuser",
+                "conditions": [
+                    {"field": "repo", "operator": "contains", "value": "project"}
+                ],
+                "review_states": ["approved"],
+            },
+            actions=[],
+        )
+
+        trigger = watcher._get_github_pr_trigger(automation)
+
+        assert trigger is not None
+        assert isinstance(trigger, GitHubPRTrigger)
+        assert trigger.account == "testuser"
+        assert len(trigger.conditions) == 1
+        assert trigger.conditions[0].field == "repo"
+        assert trigger.review_states == ["approved"]
+
+    def test_get_github_pr_trigger_returns_none_for_non_github(self):
+        """Test _get_github_pr_trigger returns None for non-GitHub triggers."""
+        watcher = GitHubPRWatcher()
+        automation = Automation(
+            id="auto_1",
+            name="Test",
+            trigger={"type": "email", "account": "test@example.com"},
+            actions=[],
+        )
+
+        assert watcher._get_github_pr_trigger(automation) is None
+
+
+class TestGitHubPRTriggerMatching:
+    """Tests for GitHub PR trigger matching."""
+
+    def test_matches_pr_review_changes_requested(self, sample_github_automation, sample_pr_data):
+        """Test matching a PR with changes_requested review."""
+        watcher = GitHubPRWatcher()
+        trigger = watcher._get_github_pr_trigger(sample_github_automation)
+        review = sample_pr_data["reviews"][0]
+
+        assert watcher._matches_pr_review(sample_pr_data, review, trigger) is True
+
+    def test_matches_pr_review_wrong_state(self, sample_github_automation, sample_pr_data):
+        """Test that review with wrong state doesn't match."""
+        watcher = GitHubPRWatcher()
+        trigger = watcher._get_github_pr_trigger(sample_github_automation)
+        review = {"state": "APPROVED", "author": "reviewer1"}
+
+        # Trigger only accepts changes_requested and commented, not approved
+        assert watcher._matches_pr_review(sample_pr_data, review, trigger) is False
+
+    def test_matches_pr_review_repo_condition(self, sample_pr_data):
+        """Test matching repo condition."""
+        watcher = GitHubPRWatcher()
+        trigger = GitHubPRTrigger(
+            account="test",
+            conditions=[
+                GitHubPRCondition(field="repo", operator="contains", value="my-project"),
+            ],
+            review_states=["changes_requested"],
+        )
+        review = {"state": "CHANGES_REQUESTED", "author": "reviewer1"}
+
+        assert watcher._matches_pr_review(sample_pr_data, review, trigger) is True
+
+    def test_does_not_match_wrong_repo(self, sample_pr_data):
+        """Test that wrong repo doesn't match."""
+        watcher = GitHubPRWatcher()
+        trigger = GitHubPRTrigger(
+            account="test",
+            conditions=[
+                GitHubPRCondition(field="repo", operator="contains", value="other-project"),
+            ],
+            review_states=["changes_requested"],
+        )
+        review = {"state": "CHANGES_REQUESTED", "author": "reviewer1"}
+
+        assert watcher._matches_pr_review(sample_pr_data, review, trigger) is False
+
+    def test_matches_reviewer_condition(self, sample_pr_data):
+        """Test matching reviewer condition."""
+        watcher = GitHubPRWatcher()
+        trigger = GitHubPRTrigger(
+            account="test",
+            conditions=[
+                GitHubPRCondition(field="reviewer", operator="equals", value="reviewer1"),
+            ],
+            review_states=["changes_requested"],
+        )
+        review = {"state": "CHANGES_REQUESTED", "author": "reviewer1"}
+
+        assert watcher._matches_pr_review(sample_pr_data, review, trigger) is True
+
+    def test_matches_multiple_conditions(self, sample_pr_data):
+        """Test that all conditions must match."""
+        watcher = GitHubPRWatcher()
+        trigger = GitHubPRTrigger(
+            account="test",
+            conditions=[
+                GitHubPRCondition(field="repo", operator="contains", value="my-project"),
+                GitHubPRCondition(field="reviewer", operator="equals", value="reviewer1"),
+            ],
+            review_states=["changes_requested"],
+        )
+        review = {"state": "CHANGES_REQUESTED", "author": "reviewer1"}
+
+        assert watcher._matches_pr_review(sample_pr_data, review, trigger) is True
+
+    def test_fails_when_one_condition_doesnt_match(self, sample_pr_data):
+        """Test that if one condition fails, the whole match fails."""
+        watcher = GitHubPRWatcher()
+        trigger = GitHubPRTrigger(
+            account="test",
+            conditions=[
+                GitHubPRCondition(field="repo", operator="contains", value="my-project"),
+                GitHubPRCondition(field="reviewer", operator="equals", value="other-reviewer"),
+            ],
+            review_states=["changes_requested"],
+        )
+        review = {"state": "CHANGES_REQUESTED", "author": "reviewer1"}
+
+        assert watcher._matches_pr_review(sample_pr_data, review, trigger) is False
+
+    def test_matches_empty_conditions(self, sample_pr_data):
+        """Test that empty conditions matches all PRs (with correct state)."""
+        watcher = GitHubPRWatcher()
+        trigger = GitHubPRTrigger(
+            account="test",
+            conditions=[],
+            review_states=["changes_requested"],
+        )
+        review = {"state": "CHANGES_REQUESTED", "author": "anyone"}
+
+        assert watcher._matches_pr_review(sample_pr_data, review, trigger) is True
+
+    def test_matches_regex_pattern(self, sample_pr_data):
+        """Test matching with regex pattern."""
+        watcher = GitHubPRWatcher()
+        trigger = GitHubPRTrigger(
+            account="test",
+            conditions=[
+                GitHubPRCondition(field="repo", operator="matches", value=r"testuser/.*-project"),
+            ],
+            review_states=["changes_requested"],
+        )
+        review = {"state": "CHANGES_REQUESTED", "author": "reviewer1"}
+
+        assert watcher._matches_pr_review(sample_pr_data, review, trigger) is True
+
+    def test_check_pr_condition_title(self, sample_pr_data):
+        """Test checking title condition."""
+        watcher = GitHubPRWatcher()
+        condition = GitHubPRCondition(field="title", operator="contains", value="new feature")
+        review = {"state": "CHANGES_REQUESTED", "author": "reviewer1"}
+
+        assert watcher._check_pr_condition(sample_pr_data, review, condition) is True
+
+    def test_check_pr_condition_missing_author_in_pr(self, sample_pr_data):
+        """Test condition check when author is missing from PR data."""
+        watcher = GitHubPRWatcher()
+        condition = GitHubPRCondition(field="author", operator="contains", value="someone")
+        review = {"state": "CHANGES_REQUESTED", "author": "reviewer1"}
+
+        # PR data without author info should still work (checks pr.author.login)
+        pr_without_author = {**sample_pr_data, "pr": {"number": 42, "title": "Test"}}
+        # With missing nested data, should return False (not crash)
+        assert watcher._check_pr_condition(pr_without_author, review, condition) is False
+
+
+class TestGitHubWatcherIntegration:
+    """Integration tests for GitHubPRWatcher with mocked dependencies."""
+
+    @pytest.mark.asyncio
+    async def test_execute_automation_creates_trigger_event(
+        self, sample_github_automation, sample_pr_data
+    ):
+        """Test that _execute_automation creates proper TriggerEvent."""
+        watcher = GitHubPRWatcher()
+        review = sample_pr_data["reviews"][0]
+
+        # Mock the execution engine and format_for_claude
+        with patch.object(watcher._engine, "run", new_callable=AsyncMock) as mock_run, \
+             patch.object(watcher, "_format_for_claude", new_callable=AsyncMock) as mock_format:
+            mock_run.return_value = MagicMock(status=MagicMock(value="success"), error=None)
+            mock_format.return_value = {"prompt": "Test prompt", "files_changed": ["file.py"]}
+
+            await watcher._execute_automation(sample_github_automation, sample_pr_data, review)
+
+            # Verify run was called
+            mock_run.assert_called_once()
+
+            # Check the trigger event
+            call_args = mock_run.call_args
+            trigger_event = call_args[0][1]
+
+            assert trigger_event.type == "github_pr"
+            assert trigger_event.data["repo"] == "testuser/my-project"
+            assert trigger_event.data["pr_number"] == 42
+            assert trigger_event.data["review"]["author"] == "reviewer1"
+            assert trigger_event.data["review"]["state"] == "CHANGES_REQUESTED"
+
+    @pytest.mark.asyncio
+    async def test_poll_processes_matching_reviews(self, sample_github_automation, sample_pr_data):
+        """Test that _poll processes reviews that match triggers."""
+        watcher = GitHubPRWatcher()
+        watcher._processed_review_ids = set()
+
+        mock_db = AsyncMock()
+        mock_db.list_automations.return_value = [sample_github_automation]
+
+        with patch("pai.watcher.get_db", return_value=mock_db), \
+             patch.object(watcher, "_fetch_prs_with_reviews", new_callable=AsyncMock) as mock_fetch, \
+             patch.object(watcher, "_execute_automation", new_callable=AsyncMock) as mock_execute, \
+             patch.object(watcher, "_save_state", new_callable=AsyncMock):
+
+            mock_fetch.return_value = [sample_pr_data]
+
+            await watcher._poll()
+
+            # Verify automation was executed
+            mock_execute.assert_called_once()
+
+            # Verify review was marked as processed
+            review_id = f"{sample_pr_data['repo']}#{sample_pr_data['pr']['number']}:12345"
+            assert review_id in watcher._processed_review_ids
+
+    @pytest.mark.asyncio
+    async def test_poll_skips_already_processed_reviews(
+        self, sample_github_automation, sample_pr_data
+    ):
+        """Test that _poll skips already processed reviews."""
+        watcher = GitHubPRWatcher()
+        review_id = f"{sample_pr_data['repo']}#{sample_pr_data['pr']['number']}:12345"
+        watcher._processed_review_ids = {review_id}
+
+        mock_db = AsyncMock()
+        mock_db.list_automations.return_value = [sample_github_automation]
+
+        with patch("pai.watcher.get_db", return_value=mock_db), \
+             patch.object(watcher, "_fetch_prs_with_reviews", new_callable=AsyncMock) as mock_fetch, \
+             patch.object(watcher, "_execute_automation", new_callable=AsyncMock) as mock_execute, \
+             patch.object(watcher, "_save_state", new_callable=AsyncMock):
+
+            mock_fetch.return_value = [sample_pr_data]
+
+            await watcher._poll()
+
+            # Verify automation was NOT executed
+            mock_execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_poll_skips_non_matching_reviews(self, sample_pr_data):
+        """Test that _poll skips reviews that don't match trigger conditions."""
+        watcher = GitHubPRWatcher()
+        watcher._processed_review_ids = set()
+
+        # Automation that expects a different repo
+        automation = Automation(
+            id="auto_1",
+            name="Test",
+            status=AutomationStatus.ACTIVE,
+            trigger=GitHubPRTrigger(
+                account="test",
+                conditions=[
+                    GitHubPRCondition(field="repo", operator="contains", value="other-project"),
+                ],
+                review_states=["changes_requested"],
+            ),
+            actions=[],
+        )
+
+        mock_db = AsyncMock()
+        mock_db.list_automations.return_value = [automation]
+
+        with patch("pai.watcher.get_db", return_value=mock_db), \
+             patch.object(watcher, "_fetch_prs_with_reviews", new_callable=AsyncMock) as mock_fetch, \
+             patch.object(watcher, "_execute_automation", new_callable=AsyncMock) as mock_execute, \
+             patch.object(watcher, "_save_state", new_callable=AsyncMock):
+
+            mock_fetch.return_value = [sample_pr_data]
+
+            await watcher._poll()
+
+            # Verify automation was NOT executed (repo doesn't match)
+            mock_execute.assert_not_called()
+
+            # But review should still be marked as processed
+            review_id = f"{sample_pr_data['repo']}#{sample_pr_data['pr']['number']}:12345"
+            assert review_id in watcher._processed_review_ids
