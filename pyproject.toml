@@ -2,6 +2,7 @@
 name = "pai"
 version = "0.1.0"
 description = "Personal AI Operating System - automate your digital life with natural language"
+keywords = ["ai", "automation", "personal-assistant", "llm", "mcp"]
 requires-python = ">=3.12"
 dependencies = [
     "typer>=0.15.0",

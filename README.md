@@ -1,5 +1,9 @@
 # PAI - Personal AI OS
 
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/github/license/mhattingpete/personal-ai-os)](LICENSE)
+[![Last Commit](https://img.shields.io/github/last-commit/mhattingpete/personal-ai-os)](https://github.com/mhattingpete/personal-ai-os/commits)
+
 Automate your digital life with natural language. PAI lets you create automations by describing what you want in plain English.
 
 ## Installation
